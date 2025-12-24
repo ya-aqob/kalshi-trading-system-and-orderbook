@@ -2,7 +2,7 @@ from .Session import Session
 import requests
 from requests import Response
 
-def send_request(session: Session, method, base_url, path) -> Response:
+def send_request(session: Session, method, base_url, path, data=None) -> Response:
     '''Makes request to base_url + path with Kalshi authentication.
        
        Returns Response object. Raises status errors via raise_for_status.
@@ -22,13 +22,14 @@ def send_request(session: Session, method, base_url, path) -> Response:
 
     match method:
         case "GET":
-            response = requests.get(base_url + path, headers=headers)
+            response = requests.get(base_url + path, headers=headers, params=data)
         case "PUT":
-            response = requests.put(base_url + path, headers=headers)
+                response = requests.put(base_url + path, headers=headers, json=data)
         case "POST":
-            response = requests.post(base_url + path, headers=headers)
+            response = requests.post(base_url + path, headers=headers, json=data)
         case "DELETE":
-            response = requests.post(base_url + path, headers=headers)
+                response = requests.delete(base_url + path, headers=headers, json=data)
+
     
     response.raise_for_status()
 

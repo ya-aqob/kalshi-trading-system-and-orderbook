@@ -1,17 +1,13 @@
 from market.BinaryMarket import BinaryMarket
 import numpy as np
-
+import time
 class Model:
 
     market: BinaryMarket # The market that the model is based on
-
-    ### Model Limits
-    max_inventory: int # The maximum allowed size of the position
     
     ### Model parameters
     T: float # Terminal time of trading session
     G: float # Risk-aversion parameter
-    W: float # Wealth
 
     ### Model variables
     k: float # Decay parameter for fill-rate w.r.t. spread size
@@ -24,14 +20,14 @@ class Model:
     ask_quote: float         # Most recent ask quote
     spread:    float         # Most recent quote spread
 
-    def __init__(self, market: BinaryMarket, max_inventory: int, k: float, q: int, T: float, t: float, G: float):
+    def __init__(self, market: BinaryMarket, k: float, q: int, T: float, G: float):
         self.k = k
         self.q = q
         self.T = T
-        self.t = t
+        self.t = time.time()
         self.G = G
 
-        self.max_inventory = max_inventory
+        self.market = market
     
     def calc_reserve_price(self) -> float:
         '''Calculates the reserve price of the market'''
@@ -46,23 +42,26 @@ class Model:
         '''Returns the optimal bid distance from the reserve price'''
         volatility = self.market.get_volatility()
 
-        spread = (self.G * self.q * (volatility ** 2) * (self.T - self.t)) + (self.G ** -1) * np.log(1 + (self.G) * (self.k ** -1))
+        distance = (self.G ** -1) * np.log(1 + (self.G) * (self.k ** -1))
 
-        return spread
+        return distance
 
     def calc_ask_quote(self) -> float:
-        return self.reservation_price - self.calc_bid_distance()
+        return self.reservation_price + self.calc_bid_distance()
 
     def calc_bid_quote(self) -> float:
-        return self.reservation_price + self.calc_bid_distance()
+        return self.reservation_price - self.calc_bid_distance()
     
-    def update(self) -> None:
+    def update(self, curr_time: float) -> None:
+        self.t = curr_time
+        self.q = self.market.get_position()["market_positions"]["position"]
         self.reservation_price = self.calc_reserve_price()
         self.ask_quote = self.calc_ask_quote()
         self.bid_quote = self.calc_bid_quote()
         self.spread = 2 * self.calc_bid_distance()
 
         return None
+
 
 
 
