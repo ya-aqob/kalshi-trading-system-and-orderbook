@@ -6,6 +6,8 @@ from cryptography.exceptions import InvalidSignature
 import datetime
 
 class Session:
+    path_to_private_key: str
+    access_key: str
 
     def __init__(self, path_to_private_key: str, access_key: str):
         self.path_to_private_key = path_to_private_key
@@ -16,7 +18,7 @@ class Session:
         except:
             raise Exception("Private key could not be loaded")
 
-    def load_private_key_from_file(file_path):
+    def load_private_key_from_file(self, file_path: str):
         '''Loads private key from file_path and returns private key'''
         with open(file_path, "rb") as key_file:
             private_key = serialization.load_pem_private_key(
@@ -33,8 +35,8 @@ class Session:
             signature = self.private_key.sign(
                 message,
                 padding.PSS(
-                mgf=padding.MGF1(hashes.SHA256()),
-                salt_length=padding.PSS.DIGEST_LENGTH
+                 mgf=padding.MGF1(hashes.SHA256()),
+                 salt_length=padding.PSS.DIGEST_LENGTH
                 ),
                 hashes.SHA256()
             )

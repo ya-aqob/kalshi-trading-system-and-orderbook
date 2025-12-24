@@ -36,7 +36,11 @@ class BinaryMarket:
 
         self.volatility = None
 
-    def update(self):
+    def update(self) -> None:
+        '''
+        Fetches and constructs new orderbook, calculates price, updates price history
+        and calculates and updates volatility.
+        '''
         orderbook = self.constructOrderbook()
 
         mid_price = orderbook.volume_weight_mid_price
@@ -47,8 +51,6 @@ class BinaryMarket:
         
         if volatility:
             self.update_volatility(volatility)
-        
-        ## To-do
         
         return None
 
@@ -113,7 +115,13 @@ class BinaryMarket:
 
     def update_volatility(self, volatility: float) -> None:
         self.volatility = volatility
+
+    def get_volatility(self) -> float | None:
+        return self.volatility
     
+    def get_mid_price(self) -> float | None:
+        return self.last_mid_price
+
     def is_ready(self) -> bool:
         '''
         Determines whether 
