@@ -1,15 +1,33 @@
 import uuid
+from .FixedPointDollars import FixedPointDollars
 
 class Order:
-    ticker: str 
-    side: str            # 'yes' or 'no'
-    action: str          # 'buy' or 'sell'
-    count: int
-    type: str            # 'limit' or 'market'
-    client_order_id: str # De-duplication ID
-    yes_price: str
+    '''
+    Representation of a KalshiAPI Order obj
+    Enforced input validation
+    '''
+    ticker: str                          # Ticker where order will be executed
+    side: str                            # 'yes' or 'no'
+    action: str                          # 'buy' or 'sell'
+    count: int                           # size of order in # of contracts
+    type: str                            # 'limit' or 'market'
+    client_order_id: str                 # Unique de-duplication ID
+    yes_price_dollars: FixedPointDollars # Price in penny dollars
 
-    def __init__(self, ticker, side, action, count, type, yes_price_dollars):
+    def __init__(self, ticker: str, side: str, action: str, count: int, type: str, 
+                 yes_price_dollars: FixedPointDollars):
+        
+        if side not in ('yes', 'no', 'YES', 'NO'):
+            raise ValueError(f"Invalid side provided: {side}")
+        if action not in ('buy', "sell"):
+            raise ValueError(f"Invalid action provided: {action}")
+        if type not in ("limit", "market", "LIMIT", "MARKET"):
+            raise ValueError(f"Invalid type: {type}")
+        if count <= 0:
+            raise ValueError(f"Invalid order count: {count}")
+        if not (0.01 <= yes_price_dollars <= 0.99):
+            raise ValueError(f"Price out of range: {yes_price_dollars}")
+        
         self.ticker = ticker
         self.side = side
         self.action = action
@@ -26,6 +44,6 @@ class Order:
             "side": self.side,
             "count": self.count,
             "type": self.type,
-            "yes_price_dollars": self.yes_price_dollars,
+            "yes_price_dollars": self.yes_price_dollars.to_float(),
             "client_order_id": self.client_order_id
         }

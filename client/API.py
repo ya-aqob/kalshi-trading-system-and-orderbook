@@ -13,7 +13,11 @@ class AuthError(Exception):
     pass
 
 class KalshiAPI:
-
+    '''
+    Class for Kalshi's REST API with retry logic.
+    All methods are synchronous and need to be passed to threads
+    to prevent slow blocking.
+    '''
     def __init__(self, session: Session, max_retries: int = 3, retry_delay: float = .1, time_out: int = 5):
         self.session = session
         self.base_url = "https://api.elections.kalshi.com"
@@ -44,10 +48,10 @@ class KalshiAPI:
         return headers
     
     def _request(self, method: str, path: str, params=None, json=None):
-        headers = self._gen_headers(method=method, path=path)
         url = self.base_url + path
         for attempt in range(self.max_retries):
             try:
+                headers = self._gen_headers(method=method, path=path)
                 response = requests.request(
                     method=method,
                     url=url,
@@ -170,4 +174,19 @@ class KalshiAPI:
         response = self._request(method="POST", path=path, json=payload)
 
         
+        return response
+
+    def batch_cancel_orders(self, orders: List[str]):
+        '''
+        Makes DELETE request to batch_delete_orders endpoint.
+        Generates HTTP status errors.
+        Returns:
+            Response JSON
+        '''
+        path = '/trade-api/v2/portfolio/orders/batched'
+
+        payload = {"ids": orders}
+
+        response = self._request(method="DELETE", path=path, json=payload)
+
         return response

@@ -1,41 +1,44 @@
 from typing import List
 from decimal import Decimal
 from dataclasses import dataclass
+from .FixedPointDollars import FixedPointDollars, ZERO, ONE, MID_DEFAULT
 
 class OrderBook:
     '''
-    Mutable orderbook updated by delta messages
+    Mutable orderbook updated by delta messages.
+    Orderbook is only valid AFTER a snapshot has been
+    applied.
     '''
 
     # Time where orderbook obj represents market orderbook
     timestamp: float
 
-    best_bid: float # Best bid price for given orderbook    
+    best_bid: FixedPointDollars # Best bid price for given orderbook    
     bid_size: int   # Size of contract at best bid price
 
-    best_ask: float # Best ask for a given orderbook (calculated through complement)
+    best_ask: FixedPointDollars # Best ask for a given orderbook (calculated through complement)
     ask_size: int   # Size of contract at best ask price
 
-    yes_book: dict[float, int] # Yes side of the orderbook in [price, resting_contract] key-value pairs
-    no_book: dict[float, int]  # No side of the order book in [price, resting_contracts] key-value pairs.
+    yes_book: dict[FixedPointDollars, int] # Yes side of the orderbook in [price, resting_contract] key-value pairs
+    no_book: dict[FixedPointDollars, int]  # No side of the order book in [price, resting_contracts] key-value pairs.
 
-    mid_price: float      # Volume-weighted mid price
-    bid_ask_spread: float # Best bid-ask spread
+    mid_price: FixedPointDollars      # Volume-weighted mid price
+    bid_ask_spread: FixedPointDollars # Best bid-ask spread
 
-    seq_n: int | None     # Sequence number of message that spawns orderbook, ensures no gaps
+    seq_n: int # Sequence number of message that spawns orderbook, ensures no gaps
 
     def __init__(self):
-        self.timestamp = -1
-        self.best_bid = 0.0
+        self.timestamp = -1.0
+        self.best_bid = ZERO
         self.bid_size = 0
 
-        self.best_ask = 100.0 # Init to >max value for min logic
+        self.best_ask = ONE # Init to >max value for min logic
         self.ask_size = 0
         self.yes_book = {}
         self.no_book = {}
 
-        self.mid_price = 0.0
-        self.bid_ask_spread = 0.0
+        self.mid_price = MID_DEFAULT
+        self.bid_ask_spread = ZERO
 
         self.seq_n = None
     
@@ -48,15 +51,17 @@ class OrderBook:
         Returns None.
         '''
         # Re-init
-        self.best_bid = 0.0
-        self.best_ask = 100.0
+        self.best_bid = ZERO
+        self.best_ask = ONE
+        self.yes_book = {}
+        self.no_book = {}
 
         self.seq_n = sequence_number
 
         if "yes_dollars" in snapshot_msg:
             yes_book = snapshot_msg["yes_dollars"]
         else:
-            no_book = []
+            yes_book = []
 
         if "no_dollars" in snapshot_msg:
             no_book = snapshot_msg["no_dollars"]
@@ -65,24 +70,33 @@ class OrderBook:
 
         for bid in yes_book:
             price, size = bid
-            
-            self.best_bid = max(self.best_bid, price)
+            price = FixedPointDollars(price)
 
-            if price in yes_book:
+            if price in self.yes_book:
                 self.yes_book[price] += size
             else:
                 self.yes_book[price] = size
+
+            if price > self.best_bid:
+                self.best_bid = price
+                self.bid_size = self.yes_book[price]
+            elif price == self.best_bid:
+                self.bid_size = self.yes_book[price]
             
         for bid in no_book:
             no_bid, size = bid
-            price = 1 - no_bid
-            
-            self.best_ask = min(self.best_ask, price)
+            no_bid = FixedPointDollars(no_bid)
+            price = no_bid.complement
 
-            if price in no_book:
-                self.no_book[price] += size
+            
+            if price < self.best_ask:
+                self.best_ask = price
+                self.ask_size = size
+
+            if no_bid in self.no_book:
+                self.no_book[no_bid] += size
             else:
-                self.no_book[price] = size
+                self.no_book[no_bid] = size
 
         self.timestamp = timestamp
         self.mid_price = self.calc_mid_price()
@@ -96,38 +110,97 @@ class OrderBook:
 
         Returns None.
         '''
+    
         self.seq_n = sequence_number
 
-        if "side" in delta_msg:
-            side = delta_msg["side"]
+        side = delta_msg.get("side")
+        price_raw = delta_msg.get("price_dollars")
+        delta = delta_msg.get("delta")
+
+        if side is None or price_raw is None or delta is None:
+            return
+
+        price = FixedPointDollars(price_raw)
 
         if side == "yes":
-            if "price_dollars" in delta_msg and "delta" in delta_msg:
-                price = delta_msg["price_dollars"]
-                delta = delta_msg["delta"]
-                if price in self.yes_book:
-                    self.yes_book[price] += delta
-                else:
-                    self.yes_book[price] = delta
-                self.best_bid = max(price, self.best_bid)
+            if price in self.yes_book:
+                self.yes_book[price] += delta
 
-        if side == "no":
-            if "price_dollars" in delta_msg and "delta" in delta_msg:
-                price = delta_msg["price_dollars"]
-                delta = delta_msg["delta"]
-                if price in self.yes_book:
-                    self.yes_book[price] += delta
-                else:
-                    self.yes_book = delta
-                self.best_ask= max(price, 1 - self.best_bid)
-        
+                if self.yes_book[price] <= 0:
+                    del self.yes_book[price]
+                    if price == self.best_bid:
+                        self._find_new_best_bid()
+                elif price == self.best_bid:
+                    self.bid_size = self.yes_book[price]
+            else:
+                self.yes_book[price] = delta
+                if price > self.best_bid:
+                    self.best_bid = price
+                    self.bid_size = delta
+
+        elif side == "no":
+            if price in self.no_book:
+                self.no_book[price] += delta
+
+                if self.no_book[price] <= 0:
+                    del self.no_book[price]
+                    if price.complement == self.best_ask:
+                        self._find_new_best_ask()
+                elif price.complement == self.best_ask:
+                    self.ask_size = self.no_book[price]
+            else:
+                self.no_book[price] = delta
+                if price.complement < self.best_ask:
+                    self.best_ask = price.complement
+                    self.ask_size = delta
+
         self.timestamp = timestamp
-                    
-    def calc_mid_price(self):
-        '''Returns the mid price of the orderbook'''
-        return (self.best_bid + self.best_ask) / 2
+        self.mid_price = self.calc_mid_price()
+        self.bid_ask_spread = self.spread()
+
+    def _find_new_best_ask(self):
+        '''Placeholder O(N) best ask func'''
+        best_ask = ONE
+        ask_size = 0
+
+        for k in self.no_book.keys():
+            if (k.complement) < best_ask:
+                best_ask = k.complement
+                ask_size = self.no_book[k]
+
+        self.best_ask = best_ask
+        self.ask_size = ask_size
+
+    def _find_new_best_bid(self):
+        '''Placeholder O(N) best bid func'''
+        best_bid = ZERO
+        bid_size = 0
+        for k in self.yes_book.keys():
+            if k > best_bid:
+                best_bid = k
+                bid_size = self.yes_book[k]
+        
+        self.best_bid = best_bid
+        self.bid_size = bid_size
+
+    def calc_mid_price(self) -> FixedPointDollars:
+        '''
+        Returns the mid price of the orderbook.
+        Must only be called when best_bid or best_ask is not None.
+        '''
+        has_ask = self.best_ask < ONE
+        has_bid = self.best_bid > ZERO
+
+        if has_ask and has_bid:
+            return (self.best_bid + self.best_ask) / 2
+        elif has_ask:
+            return self.best_ask
+        elif has_bid:
+            return self.best_bid
+        else:
+            return MID_DEFAULT
     
-    def spread(self):
+    def spread(self) -> FixedPointDollars:
         '''Returns the bid-ask spread of the orderbook'''
         return (self.best_ask - self.best_bid)
     

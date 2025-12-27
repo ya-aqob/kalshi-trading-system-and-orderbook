@@ -18,10 +18,13 @@ class PriceBuffer:
         if self.size < self.capacity:
             self.size += 1
         else:
-            self.start = (self.start + 1) % self.capacity
+            self.head = (self.head + 1) % self.capacity
 
     def __getitem__(self, idx):
-        index = (self.start + idx) % self.capacity
+        if idx >= self.size or idx < 0:
+            raise IndexError("Invalid index")
+        
+        index = (self.head + idx) % self.capacity
         return self.buffer[index]
 
     def get_last_n(self, n):

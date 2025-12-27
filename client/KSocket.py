@@ -1,6 +1,7 @@
 import asyncio
 from asyncio import Queue
 import websockets
+from websockets import ClientConnection
 from .Session import Session
 import json
 from market.BinaryMarket import BinaryMarket
@@ -14,7 +15,11 @@ logger = logging.getLogger(__name__)
 
 class KalshiWebsocket:
     '''
-    Websocket class for KalshiAPI
+    Websocket class for KalshiAPI.
+    Connection must be established before any method
+    calls that require websocket.
+    Executor must be injected before any fills can
+    be received.
     '''
 
     session: Session
@@ -22,28 +27,31 @@ class KalshiWebsocket:
     executor: Executor
     
     # Retry logic
-    max_retries: int    # The maximum number of retries attempted before exiting
+    max_retries: int  # The maximum number of retries attempted before exiting
     base_delay: float # Base delay of retry loop
     max_delay: float  # Max retry loop delay
     retries: int      # Current number of retries attempted
 
     # Websocket management
-    ws_url: str      # Base URL for websocket
-    message_id: int  # Unique ID for next message to be sent
-    is_running: bool # Retry connect iff is_running
+    ws: ClientConnection  # None on init. MUST be set before any other method calls.
+    ws_url: str           # Base URL for websocket
+    message_id: int       # Unique ID for next message to be sent
+    is_running: bool      # Retry connect iff is_running
+    _background_task: set # Prevents unintentional garbage collection of threads
 
     # Channel, sid, ticker mappings
-    ticker_to_sid: dict   # [ticker, sid] map
-    sid_to_ticker: dict   # [sid, ticker] map
+    ticker_to_sid: dict    # [ticker, sid] map
+    sid_to_ticker: dict    # [sid, ticker] map
     pending_requests: dict # [message_id, ticker] map
 
     # Orderbook rebuild logic
     pending_snapshot: bool
 
-    def __init__(self, session: Session, market: BinaryMarket, executor: Executor, max_retries: int = 5, base_delay: float = 1.0, max_delay: float = 60.0):
+    def __init__(self, session: Session, market: BinaryMarket, max_retries: int = 5, 
+                 base_delay: float = 1.0, max_delay: float = 60.0):
         self.session = session
         self.market = market
-        self.executor = executor
+        self.executor = None
 
         self.max_retries = max_retries
         self.base_delay = base_delay
@@ -62,6 +70,11 @@ class KalshiWebsocket:
 
         self.pending_snapshot = False
         self.is_running = False
+
+        self._background_task = set()
+
+    def set_executor(self, executor: Executor):
+        self.executor = executor    
 
     def _gen_headers(self, method: str, path: str) -> dict:
         '''
@@ -143,6 +156,9 @@ class KalshiWebsocket:
 
         self.pending_requests[self.message_id] = ticker
 
+        if self.ws is None:
+            raise RuntimeError("Websocket not connected")
+        
         await self.ws.send(json.dumps(subscription))
         self.message_id += 1
     
@@ -163,6 +179,9 @@ class KalshiWebsocket:
             }
         }
 
+        if self.ws is None:
+            raise RuntimeError("Websocket not connected")
+        
         await self.ws.send(json.dumps(unsubscription))
         self.message_id += 1
 
@@ -181,6 +200,9 @@ class KalshiWebsocket:
             }
         }
 
+        if self.ws is None:
+            raise RuntimeError("Websocket not connected")
+    
         await self.ws.send(json.dumps(subscription))
         self.message_id += 1
     
@@ -196,7 +218,9 @@ class KalshiWebsocket:
                 "market_ticker": ticker
             }
         }
-
+        if self.ws is None:
+            raise RuntimeError("Websocket not connected")
+        
         await self.ws.send(json.dumps(subscription))
         self.message_id += 1
 
@@ -219,7 +243,9 @@ class KalshiWebsocket:
         Sync wrapper to schedule rebuild.
         Called from market via callback when sequence chain is broken.
         '''
-        asyncio.create_task(self.rebuild_on_gap(ticker))
+        task = asyncio.create_task(self.rebuild_on_gap(ticker))
+        self._background_task.add(task)
+        task.add_done_callback(self._background_task.discard)
 
     async def handle_msg(self, message):
         '''
@@ -237,7 +263,7 @@ class KalshiWebsocket:
             sid = data['msg']['sid']
 
             if channel == "orderbook_delta":
-                ticker = self.pending_requests.pop(id)
+                ticker = self.pending_requests.pop(id, None)
                 self.sid_to_ticker[sid] = ticker
                 self.ticker_to_sid[ticker] = sid
             
@@ -248,7 +274,7 @@ class KalshiWebsocket:
         elif msg_type == "orderbook_snapshot":
             self.pending_snapshot = False
             logger.info("Orderbook snapshot received")
-            self.market.update(timestamp, data)
+            await self.market.update(timestamp, data)
 
         elif msg_type == "orderbook_delta":
             # ignore deltas if sequence chain broken
@@ -256,7 +282,7 @@ class KalshiWebsocket:
                 logger.debug("Ignoring delta while rebuilding orderbook...")
                 return
             
-            self.market.update(timestamp, data)
+            await self.market.update(timestamp, data)
         
         elif msg_type == "trade":
             pass # TO DO
@@ -264,7 +290,7 @@ class KalshiWebsocket:
         elif msg_type == "fill":
             msg_data = data['msg']
             logger.info(f"Fill received: {msg_data['trade_id']}")
-            self.executor.update_on_fill(msg_data)
+            await self.executor.on_fill(msg_data)
         
         elif msg_type == "error":
             code = data.get('msg', {}).get('code')

@@ -2,9 +2,13 @@ from market.OrderBookSnapshot import OrderBookSnapshot
 import numpy as np
 import time
 from asyncio import Queue
+from market.FixedPointDollars import FixedPointDollars
 
 class Model:
-
+    '''
+    Implementation of Avellaneda-Stoikov Model on static
+    data
+    '''
     ### Model parameters
     T: float # Terminal time of trading session
     G: float # Risk-aversion parameter
@@ -26,7 +30,7 @@ class Model:
         self.start_time = time.time()
         self.run_time = runtime
     
-    def generate_bid_quote(self, snapshot: OrderBookSnapshot, inventory: int,  volatility: float):
+    def generate_quotes(self, snapshot: OrderBookSnapshot, inventory: int,  volatility: float):
         self.t = self.normalize_time(snapshot.timestamp)
         reserve_price = self.calc_reserve_price(snapshot, inventory, volatility)
         ask_quote = self.calc_ask_quote(reserve_price)
@@ -34,29 +38,28 @@ class Model:
 
         return bid_quote, ask_quote
 
-    def calc_reserve_price(self, snapshot: OrderBookSnapshot, inventory: int, volatility: float) -> float:
+    def calc_reserve_price(self, snapshot: OrderBookSnapshot, inventory: int, volatility: float) -> FixedPointDollars:
         '''Calculates the reserve price of the market'''
         mid_price = snapshot.mid_price
-        t = self.normalize_time(snapshot.timestamp)
         reserve_price = mid_price - (inventory * self.G * (volatility ** 2)) * (self.T - self.t)
 
-        return reserve_price
+        return FixedPointDollars(reserve_price)
 
     def normalize_time(self, timestamp):
         return (timestamp - self.start_time) / self.run_time
 
-    def calc_bid_distance(self) -> float:
+    def calc_bid_distance(self) -> FixedPointDollars:
         '''Returns the optimal bid distance from the reserve price'''
 
         distance = (self.G ** -1) * np.log(1 + (self.G) * (self.k ** -1))
 
-        return distance
+        return FixedPointDollars(distance)
 
-    def calc_ask_quote(self, reservation_price: float) -> float:
-        return reservation_price + self.calc_bid_distance()
+    def calc_ask_quote(self, reservation_price: FixedPointDollars) -> FixedPointDollars:
+        return FixedPointDollars((reservation_price + self.calc_bid_distance())).clamped()
 
-    def calc_bid_quote(self, reservation_price: float) -> float:
-        return reservation_price - self.calc_bid_distance()
+    def calc_bid_quote(self, reservation_price: FixedPointDollars) -> FixedPointDollars:
+        return FixedPointDollars((reservation_price - self.calc_bid_distance())).clamped()
 
 
 
