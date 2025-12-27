@@ -1,66 +1,62 @@
-from market.BinaryMarket import BinaryMarket
+from market.OrderBookSnapshot import OrderBookSnapshot
 import numpy as np
 import time
+from asyncio import Queue
+
 class Model:
 
-    market: BinaryMarket # The market that the model is based on
-    
     ### Model parameters
     T: float # Terminal time of trading session
     G: float # Risk-aversion parameter
 
     ### Model variables
     k: float # Decay parameter for fill-rate w.r.t. spread size
-    q: int   # Size of inventory of position
     t: float # Current time
 
-    ### Model Outputs
-    reservation_price: float # Most recent indifference price
-    bid_quote: float         # Most recent bid quote
-    ask_quote: float         # Most recent ask quote
-    spread:    float         # Most recent quote spread
-
-    def __init__(self, market: BinaryMarket, k: float, q: int, T: float, G: float):
+    def __init__(self, k: float, G: float, runtime: float):
+        # Tunable params
         self.k = k
-        self.q = q
-        self.T = T
-        self.t = time.time()
         self.G = G
+        
+        # Time horizon
+        self.T = 1.0
+        self.t = 0
 
-        self.market = market
+        # Time normalization params
+        self.start_time = time.time()
+        self.run_time = runtime
     
-    def calc_reserve_price(self) -> float:
-        '''Calculates the reserve price of the market'''
-        volatility = self.market.get_volatility()
-        mid_price = self.market.get_mid_price()
+    def generate_bid_quote(self, snapshot: OrderBookSnapshot, inventory: int,  volatility: float):
+        self.t = self.normalize_time(snapshot.timestamp)
+        reserve_price = self.calc_reserve_price(snapshot, inventory, volatility)
+        ask_quote = self.calc_ask_quote(reserve_price)
+        bid_quote = self.calc_bid_quote(reserve_price)
 
-        reserve_price = mid_price - (self.q * self.G * (volatility ** 2)) * (self.T - self.t)
+        return bid_quote, ask_quote
+
+    def calc_reserve_price(self, snapshot: OrderBookSnapshot, inventory: int, volatility: float) -> float:
+        '''Calculates the reserve price of the market'''
+        mid_price = snapshot.mid_price
+        t = self.normalize_time(snapshot.timestamp)
+        reserve_price = mid_price - (inventory * self.G * (volatility ** 2)) * (self.T - self.t)
 
         return reserve_price
 
+    def normalize_time(self, timestamp):
+        return (timestamp - self.start_time) / self.run_time
+
     def calc_bid_distance(self) -> float:
         '''Returns the optimal bid distance from the reserve price'''
-        volatility = self.market.get_volatility()
 
         distance = (self.G ** -1) * np.log(1 + (self.G) * (self.k ** -1))
 
         return distance
 
-    def calc_ask_quote(self) -> float:
-        return self.reservation_price + self.calc_bid_distance()
+    def calc_ask_quote(self, reservation_price: float) -> float:
+        return reservation_price + self.calc_bid_distance()
 
-    def calc_bid_quote(self) -> float:
-        return self.reservation_price - self.calc_bid_distance()
-    
-    def update(self, curr_time: float) -> None:
-        self.t = curr_time
-        self.q = self.market.get_position()["market_positions"]["position"]
-        self.reservation_price = self.calc_reserve_price()
-        self.ask_quote = self.calc_ask_quote()
-        self.bid_quote = self.calc_bid_quote()
-        self.spread = 2 * self.calc_bid_distance()
-
-        return None
+    def calc_bid_quote(self, reservation_price: float) -> float:
+        return reservation_price - self.calc_bid_distance()
 
 
 

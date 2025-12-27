@@ -1,19 +1,38 @@
 from model.Model import Model
 from market.BinaryMarket import BinaryMarket
-from session.Session import Session
+from client.Session import Session
+from client.KSocket import KalshiWebsocket
+from client.API import KalshiAPI
+from asyncio import Queue, Task
+import asyncio
 import time
 from market.Order import Order
 import math
 
 class Executor:
 
-    quote_size: int         # The standard sizing for a quote in # of contracts, default = 1
-    max_inventory: int      # The maximum allowed size of inventory at any given time
-    wealth: float           # Current wealth of account
-    min_price: float = 0.01 # The lowest allowed price of any quote
-    max_price: float = 0.99 # The highest allowed price of any quote
+    api:     KalshiAPI
+    ws:      KalshiWebsocket
+    model:   Model
+    market:  BinaryMarket
+    session: Session
 
-    def __init__(self, model: Model, market: BinaryMarket, session: Session, runtime: int, max_inventory: int, quote_size: int = 1):
+    # Parameters
+    quote_size: int              # The standard sizing for a quote in # of contracts, default = 1
+    max_inventory: int           # The maximum allowed size of inventory at any given time
+    min_price: float = 0.01      # The lowest allowed price of any quote
+    max_price: float = 0.99      # The highest allowed price of any quote
+
+    # Variables
+    wealth: float                # Current wealth of account
+    inventory: int               # Current position held
+    fresh: bool                  # Fresh if current quote reflects state
+    quoting_task: Task | None    # Running quote task 
+
+    def __init__(self, api: KalshiAPI, ws: KalshiWebsocket, model: Model, market: BinaryMarket, session: Session, runtime: int, max_inventory: int, quote_size: int = 1):
+        self.api = api
+        self.ws = ws
+        
         self.model = model
         self.market = market
         self.session = session
@@ -21,12 +40,57 @@ class Executor:
         self.max_inventory = max_inventory
         self.quote_size = quote_size
 
-        self.wealth = market.get_balance()["balance"]
+        self.wealth = self.get_balance()
         self.terminal_time = time.time() + runtime
+        self.runtime = runtime
+        self.quoting_task = None
+        
+        self.fresh = True
 
-    def execute(self):
-        self.clear_open_orders() # Clear previous orders
-        self.order_quote_batch() # Make new quote orders
+    def update_on_fill(self, fill: dict):
+        '''
+        Takes fill message.
+        Updates inventory to reflect fill.
+        Unsets fresh flag.
+        '''
+        
+        if "count" in fill:
+            if fill["action"] == "sell":
+                self.inventory -= fill["count"]
+                if "yes_price_dollars" in fill:
+                    self.wealth += fill["count"] * fill["yes_price_dollars"]
+                self.fresh = False
+            else:
+                self.inventory += fill["count"]
+                if "yes_price_dollars" in fill:
+                    self.wealth -= fill["count"] * fill["yes_price_dollars"]
+                self.fresh = False
+
+            if not self.quoting_task or self.quoting_task.done():
+                self.quoting_task = asyncio.create_task(self._execute_quote())
+
+    async def _execute_quote(self):
+        while not self.fresh:
+            self.fresh = True
+
+            orderbook_snapshot = self.market.snapshot()
+            inventory = self.inventory
+            volatility = self.market.get_volatility()
+
+            bid_quote, ask_quote = self.model.generate_bid_quote(orderbook_snapshot, inventory, volatility)
+
+            if self.fresh:
+                await self._place_quote(bid_quote, ask_quote)
+                return
+    
+    async def _place_quote(self, bid_quote, ask_quote):
+        bid_order = self.construct_order(action="buy", price=bid_quote, count=self.quote_size).to_dict()
+        ask_order = self.construct_order(action="sell", price=ask_quote, count=self.quote_size).to_dict()
+
+        await asyncio.to_thread(self.api.batch_create_orders([ask_order, bid_order]))
+    
+    def get_balance(self) -> float:
+        return self.api.get_balance()["balance"] / 100
 
     def construct_order(self, action: str, price: float, count):
         return Order(
@@ -37,73 +101,3 @@ class Executor:
             type = "limit",
             yes_price_dollars = price
             )
-
-    def clear_open_orders(self):
-        orders = self.market.get_orders()["orders"]
-        batch = []
-
-        for order in orders:
-            batch.append(order["order_id"])
-
-        self.market.cancel_batch_order(batch)
-
-        return
-    
-    def order_quote_batch(self):
-        model = self.model
-        market = self.market
-
-        bid_quote = model.bid_quote
-        ask_quote = model.ask_quote
-
-        bid_size = self.quote_size
-        ask_size = self.quote_size
-
-        bid_cost = bid_size * bid_quote
-
-        self.wealth = market.get_balance()["balance"]
-        batch = []
-
-        # Valid iff quotes are in min and max bounds
-        valid_quotes = bid_quote >= self.min_price and bid_quote <= self.max_price and ask_quote >= self.min_price and  ask_quote <= self.max_price
-
-        if not valid_quotes:
-            return
-        
-        # Size bid to wealth constraint
-        if self.wealth < bid_cost:
-            bid_size = math.floor(self.wealth / bid_quote)
-
-        # Size quote to inventory constraint
-        if ask_size > model.q:
-            ask_size = model.q
-
-        if bid_size > 0:
-            bid_size = min(bid_size, self.max_inventory - model.q)
-            order = self.construct_order(action="buy", price=bid_quote, count=bid_size)
-            batch.append(order.to_dict())
-
-        if ask_size > 0:
-            order = self.construct_order(action="sell", price=ask_quote, count=ask_size)
-            batch.append(order.to_dict())
-        
-        if batch:
-            market.make_batch_order(batch)
-        
-        return
-
-    def run(self):
-        curr_time = time.time()
-        while curr_time < self.terminal_time:
-            
-            while not self.market.is_ready():
-                self.clear_open_orders()
-                self.market.update()
-            
-            self.market.update()
-            self.model.update(curr_time)
-            self.execute()
-
-            curr_time = time.time()
-        
-        self.clear_open_orders()
