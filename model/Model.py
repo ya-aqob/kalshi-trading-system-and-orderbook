@@ -1,8 +1,13 @@
-from market.OrderBookSnapshot import OrderBookSnapshot
-import numpy as np
-import time
-from asyncio import Queue
+from __future__ import annotations
 from market.FixedPointDollars import FixedPointDollars
+import math
+import time
+import numpy as np
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from market.OrderBookSnapshot import OrderBookSnapshot
+
 
 class Model:
     '''

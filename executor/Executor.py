@@ -1,16 +1,23 @@
-from model.Model import Model
-from market.BinaryMarket import BinaryMarket
-from client.Session import Session
+from __future__ import annotations
+from typing import TYPE_CHECKING
+
 from client.KSocket import KalshiWebsocket
-from client.API import KalshiAPI, AuthError, RateLimitError, APIError
-from asyncio import Queue, Task, Lock
+from client.API import KalshiAPI, AuthError, APIError, RateLimitError
+from market import Order, FixedPointDollars
+from market.FixedPointDollars import MAX_PRICE, MIN_PRICE
+from executor import Context
+
 import asyncio
-import time
-from market.Order import Order
-import math
-from .Context import Context
 import logging
-from market.FixedPointDollars import FixedPointDollars, MAX_PRICE, MIN_PRICE
+import math
+import time
+
+if TYPE_CHECKING:
+    from market import BinaryMarket
+    from model import Model
+    from client import Session
+
+
 
 logger = logging.getLogger(__name__)
 
@@ -28,10 +35,10 @@ class Executor:
     max_price: FixedPointDollars = MAX_PRICE # The highest allowed price of any quote
 
     # Variables
-    wealth: float                # Current wealth of account
+    balance: float               # Current balance of account
     inventory: int               # Current position held
     resting_orders: set          # Set of resting orders outstanding 
-    quote_lock: Lock             # Lock control against concurrent quote gen
+    quote_lock: asyncio.Lock     # Lock control against concurrent quote gen
 
     def __init__(self, api: KalshiAPI, model: Model, market: BinaryMarket, session: Session, runtime: int, max_inventory: int, quote_size: int = 1):
         
@@ -44,7 +51,7 @@ class Executor:
         self.max_inventory = max_inventory
         self.quote_size = quote_size
 
-        self.wealth = self.get_balance()
+        self.balance = self.get_balance()
         self.terminal_time = time.time() + runtime
         self.runtime = runtime
         self.quote_lock = asyncio.Lock()
@@ -57,6 +64,7 @@ class Executor:
         '''
         self.update_inv_on_fill(fill)
 
+        # Guard against insufficient volatility data
         if self.should_attempt_quote():
             asyncio.create_task(self._attempt_execute_quote())
 
@@ -65,16 +73,15 @@ class Executor:
         Synchronously updates inventory after a 
         fill is made. Takes fill msg payload.
         '''
-
         if "count" in fill:
             if fill["action"] == "sell":
                 self.inventory -= fill["count"]
                 if "yes_price_dollars" in fill:
-                    self.wealth += fill["count"] * fill["yes_price_dollars"]
+                    self.balance += fill["count"] * fill["yes_price_dollars"]
             else:
                 self.inventory += fill["count"]
                 if "yes_price_dollars" in fill:
-                    self.wealth -= fill["count"] * fill["yes_price_dollars"]
+                    self.balance -= fill["count"] * fill["yes_price_dollars"]
         
         if "post_position" in fill:
             order_id = fill["order_id"]
@@ -98,6 +105,7 @@ class Executor:
             ctx = self._capture_quote_context()
             bid, ask = self.model.generate_quotes(ctx.snapshot, ctx.inventory, ctx.volatility)
 
+            # Guard against insufficient volatility data
             if not self._should_quote(ctx):
                 return
 
@@ -106,14 +114,16 @@ class Executor:
     def _should_quote(self, ctx) -> bool:
         '''
         Returns whether a new quote should be made
-        immediately on context.
+        immediately on context. Guard against
+        insufficient volatility data.
         '''
         return self.market.get_volatility() is not None
 
     def should_attempt_quote(self) -> bool:
         '''
         Returns whether should attempt a new
-        quote based on current information.
+        quote based on current information. Guard against
+        insufficient volatility data.
         '''
         return self.market.get_volatility() is not None
     
@@ -155,20 +165,24 @@ class Executor:
         if self.quote_size + self.inventory > self.max_inventory:
             bid_size = max(0, self.max_inventory - self.inventory)
 
-        # Enforce wealth constraint
-        if bid_size * bid_quote > self.wealth and bid_quote > 0:
-            bid_size = min(bid_size, math.floor(self.wealth / bid_quote))
+        # Enforce balance constraint
+        if bid_size * bid_quote > self.balance and bid_quote > 0:
+            bid_size = min(bid_size, math.floor(self.balance / bid_quote))
         
         if ask_size > self.inventory:
             ask_size = self.inventory
         
         if bid_size:
-            bid_order = self.construct_order(action="buy", price=bid_quote, count=bid_size).to_dict()
-            batch.append(bid_order)
+            bid_order = self.construct_order(action="buy", price=bid_quote, count=bid_size)
+            
+            if bid_order is not None:
+                batch.append(bid_order.to_dict())
 
         if ask_size:
-            ask_order = self.construct_order(action="sell", price=ask_quote, count=ask_size).to_dict()
-            batch.append(ask_order)
+            ask_order = self.construct_order(action="sell", price=ask_quote, count=ask_size)
+            
+            if ask_order is not None:
+                batch.append(ask_order.to_dict())
         
         if not batch:
             return
@@ -209,16 +223,22 @@ class Executor:
         '''
         return self.api.get_balance()["balance"] / 100
 
-    def construct_order(self, action: str, price: float, count: int) -> Order:
+    def construct_order(self, action: str, price: FixedPointDollars, count: int) -> Order | None:
         '''
         Constructs order object based on params and executor
         configuration.
+        Swallows ValueErrors and returns None if invalid
+        order.
         '''
-        return Order(
-            ticker = self.market.ticker,
-            side = "yes",
-            action = action,
-            count= count,
-            type = "limit",
-            yes_price_dollars = price
-            )
+        try:
+            return Order(
+                ticker = self.market.ticker,
+                side = "yes",
+                action = action,
+                count= count,
+                type = "limit",
+                yes_price_dollars = price
+                )
+        
+        except ValueError as e:
+            return None

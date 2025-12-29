@@ -1,22 +1,15 @@
-from typing import List
-from collections import deque
-from decimal import Decimal
-from .OrderBook import OrderBook
-from .OrderBookSnapshot import OrderBookSnapshot
-from client.API import KalshiAPI
-from client.KSocket import KalshiWebsocket
-from client.Session import Session
-import numpy as np
-from asyncio import Queue
-import logging
-from .Order import Order
-from model.Model import Model
-from executor.Executor import Executor
+from __future__ import annotations
+from typing import TYPE_CHECKING
 import asyncio
-from sortedcontainers import SortedList
+import numpy as np
+
 from .PriceBuffer import PriceBuffer
-import time
-from .FixedPointDollars import FixedPointDollars
+from .OrderBookSnapshot import OrderBookSnapshot
+from .OrderBook import OrderBook
+
+if TYPE_CHECKING:
+    from executor import Executor
+    from client import KalshiWebsocket
 
 class BinaryMarket:
     '''
@@ -109,29 +102,22 @@ class BinaryMarket:
         '''
 
         variance_values = []
-        
+    
         size = min(len(self.price_window), self.volatility_window)
-
         price_values = self.price_window.get_last_n(size)
-
-        i = 1
-        while i < len(price_values):
+        
+        for i in range(1, len(price_values)):
             delta_time = price_values[i][1] - price_values[i - 1][1]
-
-            # Don't sample same time twice
             if delta_time <= 0:
-                i += 1
                 continue
-
-            curr_price = np.clip(float(price_values[i][0]), 1e-6, 1 - 1e-6)
-            prev_price = np.clip(float(price_values[i - 1][0]), 1e-6, 1 - 1e-6)
-
-            # Logit transformed returns
-            logit_return = np.log(curr_price / (1 - curr_price)) - np.log(prev_price / (1 - prev_price))
-
-            variance_per_unit_time = (logit_return ** 2) / delta_time
+            
+            curr_price = float(price_values[i][0])
+            prev_price = float(price_values[i - 1][0])
+            
+            # Simple price return (not logit)
+            price_return = curr_price - prev_price
+            variance_per_unit_time = (price_return ** 2) / delta_time
             variance_values.append(variance_per_unit_time)
-            i += 1
         
         if not variance_values:
             return None

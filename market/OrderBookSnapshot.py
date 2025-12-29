@@ -18,8 +18,11 @@ class OrderBookSnapshot:
 
     # Best bid in price_dollars
     best_bid: FixedPointDollars
+    bid_size: int
+
     # Best ask in price_dollars (taken from complement)
     best_ask: FixedPointDollars
+    ask_size: int
 
     # Volume-weighted Mid Price of Underlying Orderbook
     mid_price: FixedPointDollars
@@ -34,6 +37,9 @@ class OrderBookSnapshot:
         yes_side = sorted(list(book.yes_book.items()))
         no_side = sorted(list(book.no_book.items()))
 
+        bid_size = book.bid_size
+        ask_size = book.ask_size
+
         best_bid = book.best_bid
         best_ask = book.best_ask
 
@@ -46,7 +52,9 @@ class OrderBookSnapshot:
             yes_side=yes_side,
             no_side=no_side,
             best_bid=best_bid,
+            bid_size=bid_size,
             best_ask=best_ask,
+            ask_size=ask_size,
             mid_price=mid_price,
             spread=spread,
             timestamp=timestamp

@@ -12,6 +12,9 @@ class OrderBook:
 
     # Time where orderbook obj represents market orderbook
     timestamp: float
+    
+
+    # bid and ask are init to min and max values respectively
 
     best_bid: FixedPointDollars # Best bid price for given orderbook    
     bid_size: int   # Size of contract at best bid price

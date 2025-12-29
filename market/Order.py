@@ -37,6 +37,15 @@ class Order:
 
         self.client_order_id = str(uuid.uuid4())
     
+    def __hash__(self):
+        '''HASH ONLY FOR SIMULATION'''
+        return hash(self.client_order_id)
+
+    def __eq__(self, other):
+        if not isinstance(other, Order):
+            return False
+        return self.client_order_id == other.client_order_id
+
     def to_dict(self):
         return {
             "ticker": self.ticker,

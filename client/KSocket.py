@@ -1,17 +1,19 @@
-import asyncio
-from asyncio import Queue
-import websockets
-from websockets import ClientConnection
-from .Session import Session
-import json
-from market.BinaryMarket import BinaryMarket
-from executor.Executor import Executor
-import logging
-import time
-from .Subscription import Subscription
-from collections import defaultdict
+from __future__ import annotations
+from typing import TYPE_CHECKING
+from client import Session
 
-logger = logging.getLogger(__name__)
+import websockets
+import json
+import logging
+import asyncio
+import time
+
+if TYPE_CHECKING:
+    from market import BinaryMarket
+    from executor import Executor
+    from websockets import ClientConnection
+
+logger = logging.getLogger("websocket")
 
 class KalshiWebsocket:
     '''
@@ -47,10 +49,10 @@ class KalshiWebsocket:
     # Orderbook rebuild logic
     pending_snapshot: bool
 
-    def __init__(self, session: Session, market: BinaryMarket, max_retries: int = 5, 
+    def __init__(self, session: Session, max_retries: int = 5, 
                  base_delay: float = 1.0, max_delay: float = 60.0):
         self.session = session
-        self.market = market
+        self.market = None
         self.executor = None
 
         self.max_retries = max_retries
@@ -75,6 +77,9 @@ class KalshiWebsocket:
 
     def set_executor(self, executor: Executor):
         self.executor = executor    
+
+    def set_market(self, market: BinaryMarket):
+        self.market = market
 
     def _gen_headers(self, method: str, path: str) -> dict:
         '''
@@ -334,10 +339,10 @@ class KalshiWebsocket:
 
         while self.is_running:
             try:
-                await self.connect()
-
-                if self.ticker_to_sid:
-                    await self._restore_subs()
+                if self.ws is None:
+                    await self.connect()
+                    if self.ticker_to_sid:
+                        await self._restore_subs()
                 
                 async for message in self.ws:
                     try:
