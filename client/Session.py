@@ -6,7 +6,9 @@ from cryptography.exceptions import InvalidSignature
 import datetime
 
 class Session:
-    path_to_private_key: str
+    '''Representation of Kalshi API auth information'''
+
+    path_to_private_key: str # relative path to key file
     access_key: str
 
     def __init__(self, path_to_private_key: str, access_key: str):
@@ -49,5 +51,5 @@ class Session:
         current_time = datetime.datetime.now()
         timestamp = current_time.timestamp()
         current_time_milliseconds = int(timestamp * 1000)
-        timestampt_str = str(current_time_milliseconds)
-        return timestampt_str
+        timestamp_str = str(current_time_milliseconds)
+        return timestamp_str

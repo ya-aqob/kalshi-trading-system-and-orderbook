@@ -2,6 +2,7 @@ from .Session import Session
 import requests
 from typing import Tuple, List
 import time
+from requests import JSONDecodeError
 
 class APIError(Exception):
     pass
@@ -17,6 +18,7 @@ class KalshiAPI:
     Class for Kalshi's REST API with retry logic.
     All methods are synchronous and need to be passed to threads
     to prevent slow blocking.
+    Does not validate responses.
     '''
     def __init__(self, session: Session, max_retries: int = 3, retry_delay: float = .1, time_out: int = 5):
         self.session = session
@@ -48,6 +50,11 @@ class KalshiAPI:
         return headers
     
     def _request(self, method: str, path: str, params=None, json=None):
+        '''
+        Base request helper method with retry logic.
+        Generates HTTP errors and retries on decode errors.
+        Returns JSON serialization of response.      
+        '''
         url = self.base_url + path
         for attempt in range(self.max_retries):
             try:
@@ -61,24 +68,31 @@ class KalshiAPI:
                     timeout=self.time_out
                 )
                 response.raise_for_status()
-                return response.json()
+                try:
+                    return response.json()
+                except JSONDecodeError as e:
+                    continue # swallows decode failures for retry
+
             except requests.exceptions.Timeout:
                 if attempt < self.max_retries - 1:
                     time.sleep(self.retry_delay * (2 ** attempt))
                     continue
                 raise APIError("Request timed out")
             except requests.exceptions.HTTPError as e:
-                status_code = response.status_code
+                if response:
+                    status_code = response.status_code
 
-                if status_code == 401:
-                    raise AuthError("Authentication failed") from e
-                elif status_code == 429:
-                    raise RateLimitError("Rate limit exceeded") from e
-                elif status_code >= 500 and attempt < self.max_retries - 1:
-                    time.sleep(self.retry_delay * (2 ** attempt))
-                    continue
+                    if status_code == 401:
+                        raise AuthError("Authentication failed") from e
+                    elif status_code == 429:
+                        raise RateLimitError("Rate limit exceeded") from e
+                    elif status_code >= 500 and attempt < self.max_retries - 1:
+                        time.sleep(self.retry_delay * (2 ** attempt))
+                        continue
+                    else:
+                        raise APIError(f"API error ({status_code}): {e}") from e
                 else:
-                    raise APIError(f"API error ({status_code}): {e}") from e
+                    raise APIError(f"Unexpected API Error: {e}")
             except requests.exceptions.RequestException as e:
                 if attempt < self.max_retries - 1:
                     time.sleep(self.retry_delay)
