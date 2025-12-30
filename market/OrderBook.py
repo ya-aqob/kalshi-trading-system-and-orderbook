@@ -1,7 +1,10 @@
-from typing import List
+from typing import List, TYPE_CHECKING
 from decimal import Decimal
 from dataclasses import dataclass
 from .FixedPointDollars import FixedPointDollars, ZERO, ONE, MID_DEFAULT
+
+if TYPE_CHECKING:
+    from client.WebsocketResponses import OrderBookDeltaMsg, OrderBookSnapshotMsg
 
 class OrderBook:
     '''
@@ -45,10 +48,8 @@ class OrderBook:
 
         self.seq_n = None
     
-    def _apply_snapshot(self, timestamp: float, sequence_number: int, snapshot_msg: dict) -> None:
+    def _apply_snapshot(self, timestamp: float, sequence_number: int, snapshot_msg: OrderBookSnapshotMsg) -> None:
         '''
-        Accepts timestamp (in ns) of receipt of snapshot and snapshot message.
-
         Updates all fields of OrderBook to match snapshot.
 
         Returns None.
@@ -61,13 +62,13 @@ class OrderBook:
 
         self.seq_n = sequence_number
 
-        if "yes_dollars" in snapshot_msg:
-            yes_book = snapshot_msg["yes_dollars"]
+        if snapshot_msg.yes_dollars:
+            yes_book = snapshot_msg.yes_dollars
         else:
             yes_book = []
 
-        if "no_dollars" in snapshot_msg:
-            no_book = snapshot_msg["no_dollars"]
+        if snapshot_msg.no_dollars:
+            no_book = snapshot_msg.no_dollars
         else:
             no_book = []
 
@@ -105,7 +106,7 @@ class OrderBook:
         self.mid_price = self.calc_mid_price()
         self.bid_ask_spread = self.spread()  
 
-    def _apply_delta(self, timestamp: float, sequence_number: int, delta_msg: dict) -> None:
+    def _apply_delta(self, timestamp: float, sequence_number: int, delta_msg: OrderBookDeltaMsg) -> None:
         '''
         Accepts timestamp (in ns) of receipt of delta and delta message.
 
@@ -116,16 +117,10 @@ class OrderBook:
     
         self.seq_n = sequence_number
 
-        side = delta_msg.get("side")
-        price_raw = delta_msg.get("price_dollars")
-        delta = delta_msg.get("delta")
+        delta = delta_msg.delta
+        price = FixedPointDollars(delta_msg.price_dollars)
 
-        if side is None or price_raw is None or delta is None:
-            return
-
-        price = FixedPointDollars(price_raw)
-
-        if side == "yes":
+        if delta_msg.side == "yes":
             if price in self.yes_book:
                 self.yes_book[price] += delta
 
@@ -136,12 +131,13 @@ class OrderBook:
                 elif price == self.best_bid:
                     self.bid_size = self.yes_book[price]
             else:
-                self.yes_book[price] = delta
-                if price > self.best_bid:
-                    self.best_bid = price
-                    self.bid_size = delta
+                if delta > 0:
+                    self.yes_book[price] = delta
+                    if price > self.best_bid:
+                        self.best_bid = price
+                        self.bid_size = delta
 
-        elif side == "no":
+        if delta_msg.side == "no":
             if price in self.no_book:
                 self.no_book[price] += delta
 
@@ -189,7 +185,8 @@ class OrderBook:
     def calc_mid_price(self) -> FixedPointDollars:
         '''
         Returns the mid price of the orderbook.
-        Must only be called when best_bid or best_ask is not None.
+        Returns default mid price if one or more of 
+        the ask and bid are invalid.
         '''
         has_ask = self.best_ask < ONE
         has_bid = self.best_bid > ZERO

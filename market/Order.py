@@ -1,5 +1,5 @@
 import uuid
-from .FixedPointDollars import FixedPointDollars
+from .FixedPointDollars import FixedPointDollars, MAX_PRICE, MIN_PRICE
 
 class Order:
     '''
@@ -19,13 +19,13 @@ class Order:
         
         if side not in ('yes', 'no', 'YES', 'NO'):
             raise ValueError(f"Invalid side provided: {side}")
-        if action not in ('buy', "sell"):
+        if action not in ('buy', 'sell', "BUY", "SELL"):
             raise ValueError(f"Invalid action provided: {action}")
         if type not in ("limit", "market", "LIMIT", "MARKET"):
             raise ValueError(f"Invalid type: {type}")
         if count <= 0:
             raise ValueError(f"Invalid order count: {count}")
-        if not (0.01 <= yes_price_dollars <= 0.99):
+        if not (MIN_PRICE <= yes_price_dollars <= MAX_PRICE):
             raise ValueError(f"Price out of range: {yes_price_dollars}")
         
         self.ticker = ticker
@@ -38,7 +38,6 @@ class Order:
         self.client_order_id = str(uuid.uuid4())
     
     def __hash__(self):
-        '''HASH ONLY FOR SIMULATION'''
         return hash(self.client_order_id)
 
     def __eq__(self, other):

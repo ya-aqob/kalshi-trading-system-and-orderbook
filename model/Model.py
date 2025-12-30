@@ -35,9 +35,9 @@ class Model:
         self.start_time = time.time()
         self.run_time = runtime
     
-    def generate_quotes(self, snapshot: OrderBookSnapshot, inventory: int,  volatility: float):
-        self.t = self.normalize_time(snapshot.timestamp)
-        reserve_price = self.calc_reserve_price(snapshot, inventory, volatility)
+    def generate_quotes(self, orderbook_snapshot: OrderBookSnapshot, inventory: int,  volatility: float):
+        self.t = self.normalize_time(orderbook_snapshot.timestamp)
+        reserve_price = self.calc_reserve_price(orderbook_snapshot, inventory, volatility)
         ask_quote = self.calc_ask_quote(reserve_price)
         bid_quote = self.calc_bid_quote(reserve_price)
 

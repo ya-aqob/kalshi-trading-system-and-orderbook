@@ -2,6 +2,12 @@ class PriceBuffer:
     '''Basic circular buffer implementation for maintaining price history
        O(1) append, O(1) access by index, O(n) last_n_obj access
     '''
+
+    buffer: list
+    capacity: int
+    size: int # Number of none-null elements
+    head: int # points to logical 0-th index
+
     def __init__(self, max_size=500):
         self.buffer = [None] * max_size
         self.capacity = max_size

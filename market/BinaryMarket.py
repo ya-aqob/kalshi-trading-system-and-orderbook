@@ -10,10 +10,13 @@ from .OrderBook import OrderBook
 if TYPE_CHECKING:
     from executor import Executor
     from client import KalshiWebsocket
+    from client.WebsocketResponses import OrderBookDeltaEnvelope, OrderBookSnapshotEnvelope, OrderBookDeltaMsg, OrderBookSnapshotMsg
 
 class BinaryMarket:
     '''
-    Class representing a single ticker in a single BinaryMarket
+    Class representing a single ticker in a Binary Market (yes/no).
+    All asset-specific fields and methods are based on the YES resolution
+    in the given ticker's market.
     '''
     executor: Executor         # None on init. MUST be injected before any method calls.
 
@@ -35,40 +38,36 @@ class BinaryMarket:
         self.orderbook = OrderBook()
 
         self.volatility = None
-        self.fresh = True
 
     def set_executor(self, executor: Executor):
+        '''Executor dependency injection'''
         self.executor = executor
-    
-    def set_websocket(self, websocket: KalshiWebsocket):
-        self.ws = websocket
 
-    async def update(self, timestamp: float, update: dict) -> None:
+    async def update(self, timestamp: float, update: OrderBookSnapshotEnvelope | OrderBookDeltaEnvelope) -> None:
         '''
-        Takes orderbook update channel message and updates the orderbook.
+        Updates the orderbook to match update.
         Fire-and-forgets an attempt at quote placement/execution.
         Returns none.
         '''
         if self.executor is None:
             raise RuntimeError("Executor not configured")
 
-        update_type = update["type"]
-        data = update["msg"]
-        seq_n = update["seq"]
+        update_type = update.type
 
-        if update_type == "orderbook_snapshot":
-            self._load_snapshot(timestamp, seq_n, data)
-        elif update_type == "orderbook_delta":
+        if update.type == "orderbook_snapshot":
+            self._load_snapshot(timestamp, update.seq, update.msg)
+        
+        if update.type == "orderbook_delta":
             
             # Maintain sequence number invariant
-            if self.orderbook.seq_n is not None and self.orderbook.seq_n != (seq_n - 1):
+            if self.orderbook.seq_n is not None and self.orderbook.seq_n != (update.seq - 1):
 
                 if self.on_gap_callback:
                     self.on_gap_callback(self.ticker)
 
                 return
 
-            self._apply_delta(timestamp, seq_n, data)
+            self._apply_delta(timestamp, update.seq, update.msg)
         
         self.price_window.add([self.orderbook.mid_price, timestamp])
         
@@ -83,13 +82,15 @@ class BinaryMarket:
         '''
         return OrderBookSnapshot.from_orderbook(self.orderbook)
 
-    def _load_snapshot(self, timestamp: float, seq_n: int, snapshot_msg: dict) -> None:
+    def _load_snapshot(self, timestamp: float, seq_n: int, snapshot_msg: OrderBookSnapshotMsg) -> None:
+        '''Resets the price window and updates orderbook to given snapshot'''
         # Clear price window, order invariant broken
         self.price_window = PriceBuffer(max_size=self.volatility_window)
 
         self.orderbook._apply_snapshot(timestamp, seq_n, snapshot_msg)
     
-    def _apply_delta(self, timestamp: float, seq_n: int, delta_msg: dict) -> None:
+    def _apply_delta(self, timestamp: float, seq_n: int, delta_msg: OrderBookDeltaMsg) -> None:
+        '''Updates orderbook to reflect new delta'''
         self.orderbook._apply_delta(timestamp, seq_n, delta_msg)
 
     def calculate_volatility(self) -> float | None:
@@ -125,10 +126,9 @@ class BinaryMarket:
         return np.sqrt(np.mean(variance_values))
 
     def update_volatility(self, volatility: float) -> float | None:
+        '''Sets new volatility'''
         self.volatility = volatility
 
     def get_volatility(self) -> float | None:
+        '''Returns current volatility'''
         return self.volatility
-
-    def is_fresh(self) -> bool:
-        return self.fresh
