@@ -1,12 +1,14 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING
 from client import Session
-
+from .WebsocketResponses import FillEnvelope, OrderBookDeltaEnvelope, OrderBookSnapshotEnvelope
 import websockets
 import json
 import logging
 import asyncio
 import time
+from pydantic import BaseModel, ValidationError
+from typing import Literal
 
 if TYPE_CHECKING:
     from market import BinaryMarket
@@ -39,7 +41,7 @@ class KalshiWebsocket:
     ws_url: str           # Base URL for websocket
     message_id: int       # Unique ID for next message to be sent
     is_running: bool      # Retry connect iff is_running
-    _background_task: set # Prevents unintentional garbage collection of threads
+    _background_task: set # Prevents unintentional garbage collection of tasks
 
     # Channel, sid, ticker mappings
     ticker_to_sid: dict    # [ticker, sid] map
@@ -190,8 +192,10 @@ class KalshiWebsocket:
         await self.ws.send(json.dumps(unsubscription))
         self.message_id += 1
 
-        del self.ticker_to_sid[ticker]
-        del self.sid_to_ticker[sid]
+        # Atomic deletion sequence to ensure sync between mappings
+        if ticker in self.ticker_to_sid:
+            del self.ticker_to_sid[ticker]
+            del self.sid_to_ticker[sid]
 
     async def subscribe_fills(self):
         '''
@@ -259,7 +263,6 @@ class KalshiWebsocket:
         '''
         data = json.loads(message)
         timestamp = time.time()
-
         msg_type = data.get("type")
 
         if msg_type == "subscribed":
@@ -276,28 +279,36 @@ class KalshiWebsocket:
             else:
                 logger.info(f"Subscribed to channel {channel} (sid={sid})")
 
-        elif msg_type == "orderbook_snapshot":
-            self.pending_snapshot = False
-            logger.info("Orderbook snapshot received")
-            await self.market.update(timestamp, data)
+        try:
+            if msg_type == "orderbook_snapshot":
+                envelope = OrderBookSnapshotEnvelope.model_validate(data)
+                self.pending_snapshot = False
+                logger.info("Orderbook snapshot received")
+                await self.market.update(timestamp, envelope)
 
-        elif msg_type == "orderbook_delta":
-            # ignore deltas if sequence chain broken
-            if self.pending_snapshot:
-                logger.debug("Ignoring delta while rebuilding orderbook...")
-                return
-            
-            await self.market.update(timestamp, data)
+            elif msg_type == "orderbook_delta":
+                envelope = OrderBookDeltaEnvelope.model_validate(data)
+                # ignore deltas if sequence chain broken
+                if self.pending_snapshot:
+                    logger.debug("Ignoring delta while rebuilding orderbook...")
+                    return
+                await self.market.update(timestamp, envelope)
         
-        elif msg_type == "trade":
-            pass # TO DO
+        except ValidationError as e:
+            # Trigger re-build if invalid orderbook update
+            self._handle_gap(self.market.ticker)  
+            logger.error(f"Invalid message structure: {e}")
+
+        try:
+            if msg_type == "fill":
+                envelope = FillEnvelope.model_validate(data)
+                logger.info(f"Fill received: {envelope.msg.trade_id}")
+                await self.executor.on_fill(envelope.msg)
+
+        except ValidationError as e:
+            await self.executor.on_inventory_mismatch()
         
-        elif msg_type == "fill":
-            msg_data = data['msg']
-            logger.info(f"Fill received: {msg_data['trade_id']}")
-            await self.executor.on_fill(msg_data)
-        
-        elif msg_type == "error":
+        if msg_type == "error":
             code = data.get('msg', {}).get('code')
             msg = data.get('msg', {}).get('msg')
             id = data.get('id')
