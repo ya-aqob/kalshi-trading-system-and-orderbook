@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 import asyncio
 import numpy as np
 
@@ -8,52 +8,41 @@ from .OrderBookSnapshot import OrderBookSnapshot
 from .OrderBook import OrderBook
 
 if TYPE_CHECKING:
-    from executor import Executor
-    from client import KalshiWebsocket
     from client.WebsocketResponses import OrderBookDeltaEnvelope, OrderBookSnapshotEnvelope, OrderBookDeltaMsg, OrderBookSnapshotMsg
 
 class BinaryMarket:
     '''
-    Class representing a single ticker in a Binary Market (yes/no).
+    Base class representing a single ticker in a Binary Market (yes/no).
     All asset-specific fields and methods are based on the YES resolution
     in the given ticker's market.
+
+    Provides on_update_callback to allow for connection executor update logic.
     '''
-    executor: Executor         # None on init. MUST be injected before any method calls.
+    ticker: str                  # The ticker of the BinaryPrediction Market
 
-    ticker: str                # The ticker of the BinaryPrediction Market
+    price_window: PriceBuffer    # history of prices in sequence number order, [price, timestamp] pairs
+    orderbook: OrderBook         # The mutable orderbook representing the market
 
-    price_window: PriceBuffer  # history of prices in sequence number order, [price, timestamp] pairs
-    orderbook: OrderBook       # The mutable orderbook representing the market
+    volatility: float | None     # Volatility over price_window, None if price_window is not full
 
-    volatility: float | None   # Volatility over price_window, None if price_window is not full
-
-    def __init__(self, ticker: str, volatility_window: int, on_gap_callback=None):
+    def __init__(self, ticker: str, volatility_window: int, on_gap_callback=None, on_update_callback=None):
         
         self.price_window = PriceBuffer(max_size=volatility_window)
         self.volatility_window = volatility_window
         self.ticker = ticker
 
-        self.executor = None
         self.on_gap_callback = on_gap_callback
+        self.on_update_callback = on_update_callback
         self.orderbook = OrderBook()
 
         self.volatility = None
 
-    def set_executor(self, executor: Executor):
-        '''Executor dependency injection'''
-        self.executor = executor
-
     async def update(self, timestamp: float, update: OrderBookSnapshotEnvelope | OrderBookDeltaEnvelope) -> None:
         '''
         Updates the orderbook to match update.
-        Fire-and-forgets an attempt at quote placement/execution.
+        Makes call to on-update callback.
         Returns none.
         '''
-        if self.executor is None:
-            raise RuntimeError("Executor not configured")
-
-        update_type = update.type
-
         if update.type == "orderbook_snapshot":
             self._load_snapshot(timestamp, update.seq, update.msg)
         
@@ -73,9 +62,15 @@ class BinaryMarket:
         
         self.update_volatility(self.calculate_volatility())
 
-        if self.executor.should_attempt_quote():
-            asyncio.create_task(self.executor.on_market_update())
-        
+        self.post_update_action()
+
+    def post_update_action(self):
+        '''
+        Fire-and-forgets on-update callback if it exists.
+        '''
+        if self.on_update_callback:
+            asyncio.create_task(self.on_update_callback())
+
     def snapshot(self) -> OrderBookSnapshot:
         '''
         Returns a snapshot of the current orderbook.
