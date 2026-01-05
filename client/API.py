@@ -3,6 +3,9 @@ import requests
 from typing import Tuple, List
 import time
 from requests import JSONDecodeError
+import logging
+
+logger = logging.getLogger(__name__)
 
 class APIError(Exception):
     pass
@@ -18,11 +21,11 @@ class KalshiAPI:
     Class for Kalshi's REST API with retry logic.
     All methods are synchronous and need to be passed to threads
     to prevent slow blocking.
-    Does not validate responses.
+    No responses are type validated.
     '''
     def __init__(self, session: Session, max_retries: int = 3, retry_delay: float = .1, time_out: int = 5):
         self.session = session
-        self.base_url = "https://api.elections.kalshi.com"
+        self.base_url = "https://demo-api.kalshi.co"
 
         self.max_retries = max_retries
         self.retry_delay = retry_delay
@@ -71,7 +74,7 @@ class KalshiAPI:
                 try:
                     return response.json()
                 except JSONDecodeError as e:
-                    continue # swallows decode failures for retry
+                    logger.error(f"Response decode error: {e}")
 
             except requests.exceptions.Timeout:
                 if attempt < self.max_retries - 1:
@@ -202,5 +205,45 @@ class KalshiAPI:
         payload = {"ids": orders}
 
         response = self._request(method="DELETE", path=path, json=payload)
+
+        return response
+
+    def get_event(self, event_ticker: str):
+        '''
+        Makes GET request to get_event endpoint.
+        Generates HTTP status errors.
+        Returns:
+            Response JSON
+        '''
+        path = f'/trade-api/v2/events/{event_ticker}'
+
+        response = self._request(method="GET", path=path)
+
+        return response
+    
+    def get_market(self, market_ticker: str):
+        '''
+        Makes GET request to markets endpoint.
+        Generates HTTP status errors.
+        Returns:
+            Response JSON
+        '''
+
+        path = f'/trade-api/v2/markets/{market_ticker}'
+
+        response = self._request(method="GET", path=path)
+        
+        return response
+
+    def get_user_data_timestamp(self):
+        '''
+        Makes GET request to get_user_data_timestamp endpoint.
+        Generates HTTP status errors.
+        Returns:
+            Response JSON
+        '''
+        path = '/trade-api/v2/exchange/user_data_timestamp'
+
+        response = self._request(method="GET", path=path)
 
         return response

@@ -52,6 +52,6 @@ class Order:
             "side": self.side,
             "count": self.count,
             "type": self.type,
-            "yes_price_dollars": self.yes_price_dollars.to_float(),
+            "yes_price_dollars": self.yes_price_dollars.to_string(),
             "client_order_id": self.client_order_id
         }

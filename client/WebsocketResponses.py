@@ -35,6 +35,7 @@ class FillMsg(BaseModel):
     order_id: str
     market_ticker: str
     side: Literal["yes", "no"]
+    purchased_side: Literal["yes", "no"]
     yes_price_dollars: float
     count: int
     action: Literal["buy", "sell"]

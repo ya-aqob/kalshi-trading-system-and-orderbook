@@ -1,3 +1,4 @@
+from __future__ import annotations
 from typing import List, TYPE_CHECKING
 from decimal import Decimal
 from dataclasses import dataclass

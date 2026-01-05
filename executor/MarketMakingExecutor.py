@@ -8,12 +8,14 @@ from executor import Context
 import asyncio
 import math
 import time
+import logging
 
 if TYPE_CHECKING:
     from market import BinaryMarket
     from model import Model
     from client import Session
     from client.WebsocketResponses import FillMsg
+
 
 class MarketMakingExecutor(Executor):
     '''
@@ -24,12 +26,20 @@ class MarketMakingExecutor(Executor):
     Triggers quote placement on market update and
     fills.
     '''
+    
+    quote_size: int # Standard size of each quote (in number of contracts)
+
     def __init__(self, api: KalshiAPI, model: Model, market: BinaryMarket, session: Session, runtime: int, max_inventory: int, quote_size: int = 1):
         
-        super().__init__(api, model, market, session, runtime, max_inventory=max_inventory)
+        super().__init__(api, market, session, max_inventory)
+        
         self.quote_size = quote_size
+        self.model = model
+        
+        self.terminal_time = time.time() + runtime
+        self.runtime = runtime
     
-    async def on_fill(self, fill: FillMsg):
+    def on_fill(self, fill: FillMsg):
         '''
         Updates inv on FillMsg then fire-and-forgets
         an attempt at quote execution.
@@ -38,7 +48,7 @@ class MarketMakingExecutor(Executor):
 
         # Guard against insufficient volatility data
         if self.should_attempt_quote():
-            await self._attempt_execute_quote()
+            asyncio.create_task(self._attempt_execute_quote())
     
     async def _attempt_execute_quote(self):
         '''
@@ -150,30 +160,11 @@ class MarketMakingExecutor(Executor):
         if not batch:
             return
         
-        self.unregistered_fills.clear()
-        
-        try:
-            response = await asyncio.to_thread(self.api.batch_create_orders, batch)
-        except:
-            # Re-sync on failure to ensure accurate orders
-            await self._sync_orders()
-            return
-
-        if "orders" in response:
-            for order in response.get("orders"):
-                order_id = order["order_id"]
-                placed_count = order["count"]
-
-                filled = self.unregistered_fills.pop(order_id, 0)
-                
-                net_count = placed_count - filled
-
-                if net_count > 0:
-                    self.resting_orders[order_id] = net_count
+        await self._place_batch_order(batch)
     
-    async def on_market_update(self):
+    def on_market_update(self):
         '''
         Public entrypoint for post-market-update logic.
         To be wired to market for event-driven quoting.
         '''
-        await self._attempt_execute_quote()
+        asyncio.create_task(self._attempt_execute_quote()) 

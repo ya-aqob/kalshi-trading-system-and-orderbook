@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from executor import Executor
     from websockets import ClientConnection
 
-logger = logging.getLogger("websocket")
+logger = logging.getLogger("ks_websocket")
 
 class KalshiWebsocket:
     '''
@@ -303,7 +303,7 @@ class KalshiWebsocket:
             if msg_type == "fill":
                 envelope = FillEnvelope.model_validate(data)
                 logger.info(f"Fill received: {envelope.msg.trade_id}")
-                await self.executor.on_fill(envelope.msg)
+                self.executor.on_fill(envelope.msg)
 
         except ValidationError as e:
             await self.executor.on_inventory_mismatch()

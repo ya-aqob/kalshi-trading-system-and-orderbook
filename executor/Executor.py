@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from client import Session
     from client.WebsocketResponses import FillMsg
 
-
+fill_logger = logging.getLogger("fills")
 logger = logging.getLogger(__name__)
 
 class Executor:
@@ -41,7 +41,7 @@ class Executor:
 
     # Variables
     balance: float               # Current balance of account
-    inventory: int               # Current position held
+    inventory: int               # Current position held (net long/short on YES)
     quote_lock: asyncio.Lock     # Lock control against concurrent quote gen
 
     # The union of resting_orders and unregistered_fills is ALWAYS representative of total order state
@@ -50,10 +50,9 @@ class Executor:
     unregistered_fills: Dict[str, int]      # Map of changed orders during async creation op
                                             # always coherent w.r.t. resting_orders
 
-    def __init__(self, api: KalshiAPI, model: Model, market: BinaryMarket, session: Session, runtime: int, max_inventory: int):
+    def __init__(self, api: KalshiAPI, market: BinaryMarket, session: Session, max_inventory: int):
         
         self.api = api
-        self.model = model
         self.market = market
         self.session = session
 
@@ -61,8 +60,6 @@ class Executor:
         self.max_inventory = max_inventory
 
         self.balance = self.get_balance()
-        self.terminal_time = time.time() + runtime
-        self.runtime = runtime
         self.quote_lock = asyncio.Lock()
 
         self.resting_orders = dict()
@@ -72,7 +69,7 @@ class Executor:
         '''Capture snapshot of executor state'''
         return ExecutorSnapshot.from_executor(self)
 
-    async def on_fill(self, fill: FillMsg):
+    def on_fill(self, fill: FillMsg):
         '''
         Event-handler for fill messages.
         Override to implement post-fill logic.
@@ -81,16 +78,43 @@ class Executor:
     
     def update_inv_on_fill(self, fill: FillMsg):
         '''
-        Synchronously updates inventory after a 
-        fill is made and updates resting_orders.
+        Updates inventory and balance according
+        to fill message. Supports fills on both
+        sides of the market.
         '''
-        if fill.action == "sell":
-            self.inventory -= fill.count
-            self.balance += fill.count * fill.yes_price_dollars
-            
-        else:
-            self.inventory += fill.count
-            self.balance -= fill.count * fill.yes_price_dollars
+        
+        yes_price_dollars = fill.yes_price_dollars
+
+        if fill.side == "yes":
+            price = yes_price_dollars
+
+            if fill.action == "buy":
+
+                if self.inventory < 0:
+                    pairs = min(fill.count, -self.inventory)
+                    self.balance += pairs * 1.0
+
+                self.inventory += fill.count
+                self.balance -= fill.count * price
+                fill_logger.info(f"Long {fill.count} @ {yes_price_dollars}")
+            else:
+                self.inventory -= fill.count
+                self.balance += fill.count * price
+                fill_logger.info(f"Short {fill.count} @ {yes_price_dollars}")
+
+        if fill.side == "no":
+            price = 1 - yes_price_dollars
+            if fill.action == "buy":
+                if self.inventory > 0:
+                    pairs = min(fill.count, self.inventory)
+                    self.balance += pairs * 1.0
+                self.inventory -= fill.count
+                self.balance -= fill.count * price
+                fill_logger.info(f"Short {fill.count} @ {yes_price_dollars}")
+            else:
+                self.inventory += fill.count
+                self.balance += fill.count * price
+                fill_logger.info(f"Long {fill.count} @ {yes_price_dollars}")
         
         order_id = fill.order_id
 
@@ -146,7 +170,11 @@ class Executor:
                 self.resting_orders[order_id] = order["remaining_count"]
 
     async def on_inventory_mismatch(self):
-        '''Public entry point for syncing executor inventory'''
+        '''
+        Syncs inventory and balance in executor.
+        To be called when inventory is expected
+        to be inaccurate.
+        '''
         await self._sync_inventory()
         await self._sync_balance()
 
@@ -181,7 +209,29 @@ class Executor:
         else:
             return True
     
-    async def on_market_update(self):
+    async def _place_batch_order(self, orders: list[dict]):
+        self.unregistered_fills.clear()
+
+        try:
+            response = await asyncio.to_thread(self.api.batch_create_orders, orders)
+        except Exception:
+            # Re-sync on failure to ensure accurate orders
+            await self._sync_orders()
+            return
+
+        if "orders" in response:
+            for order in response.get("orders"):
+                order_id = order["order_id"]
+                placed_count = order["count"]
+
+                filled = self.unregistered_fills.pop(order_id, 0)
+                
+                net_count = placed_count - filled
+
+                if net_count > 0:
+                    self.resting_orders[order_id] = net_count
+
+    def on_market_update(self):
         '''
         Event-handler for market updates.
         Override to implement post-update
@@ -201,8 +251,12 @@ class Executor:
         '''
         Constructs order object based on params and executor
         configuration.
-        Swallows ValueErrors and returns None if invalid
+
+        Order is always on the yes side, so
+        action controls the implementation of the
         order.
+
+        Returns None if args are invalid.
         '''
         try:
             return Order(
@@ -216,3 +270,4 @@ class Executor:
         
         except ValueError as e:
             return None
+        

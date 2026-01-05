@@ -66,10 +66,10 @@ class BinaryMarket:
 
     def post_update_action(self):
         '''
-        Fire-and-forgets on-update callback if it exists.
+        Calls on-update callback if it exists.
         '''
         if self.on_update_callback:
-            asyncio.create_task(self.on_update_callback())
+            self.on_update_callback()
 
     def snapshot(self) -> OrderBookSnapshot:
         '''

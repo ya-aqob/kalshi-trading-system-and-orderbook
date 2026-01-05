@@ -76,6 +76,9 @@ class FixedPointDollars(Decimal):
     def to_float(self) -> float:
         """Convert to float for API calls."""
         return float(self)
+    
+    def to_string(self) -> str:
+        return str(self)
 
 ZERO = FixedPointDollars('0')
 ONE = FixedPointDollars('1')
