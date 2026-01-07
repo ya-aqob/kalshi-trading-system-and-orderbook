@@ -1,15 +1,14 @@
 from __future__ import annotations
-from typing import TYPE_CHECKING, Dict
+from typing import TYPE_CHECKING, Dict, List, Tuple
 from .ExecutorSnapshot import ExecutorSnapshot
 from client.API import KalshiAPI, AuthError, APIError, RateLimitError
 from market import Order, FixedPointDollars
 from market.FixedPointDollars import MAX_PRICE, MIN_PRICE, MID_DEFAULT
 from executor import Context
+from abc import ABC, abstractmethod
 
 import asyncio
 import logging
-import math
-import time
 
 if TYPE_CHECKING:
     from market import BinaryMarket
@@ -20,15 +19,21 @@ if TYPE_CHECKING:
 fill_logger = logging.getLogger("fills")
 logger = logging.getLogger(__name__)
 
-class Executor:
+class Executor(ABC):
     '''
     Base class for Executor agent that manages portfolio state,
     synchronization, order creation, and snapshotting.
 
     Provides two event-handlers for fill and market update
     message handling.
+
+    Provides an execution lock that should be utilized
+    in subclasses to prevent trading during state reconciliation.
+
+    Reconcile must be called during Executor state initialization.
     '''
 
+    # Composition Elements
     api:     KalshiAPI
     model:   Model
     market:  BinaryMarket
@@ -42,13 +47,15 @@ class Executor:
     # Variables
     balance: float               # Current balance of account
     inventory: int               # Current position held (net long/short on YES)
-    quote_lock: asyncio.Lock     # Lock control against concurrent quote gen
 
     # The union of resting_orders and unregistered_fills is ALWAYS representative of total order state
     resting_orders: Dict[str, int]          # Map of resting orders outstanding, represents whole order state
                                             # before and after batch creation call
     unregistered_fills: Dict[str, int]      # Map of changed orders during async creation op
                                             # always coherent w.r.t. resting_orders
+
+    # Synchronization
+    _execution_lock: asyncio.Lock # Held during reconciliation to pause trading
 
     def __init__(self, api: KalshiAPI, market: BinaryMarket, session: Session, max_inventory: int):
         
@@ -59,23 +66,85 @@ class Executor:
         self.inventory = 0
         self.max_inventory = max_inventory
 
-        self.balance = self.get_balance()
-        self.quote_lock = asyncio.Lock()
+        self.balance = 0
 
         self.resting_orders = dict()
         self.unregistered_fills = dict()
 
+        self._execution_lock = asyncio.Lock()
+    
+    def calculate_transaction_cost(self, price: float, count_taken: int, count_made: int):
+        '''
+        Calculates the total transaction cost of a trade.
+        '''
+        fees = self.market.fee_schedule.calculate_mixed_fees(price, count_made, count_taken)
+        return fees + (price * (count_taken + count_made))
+
     def snapshot(self) -> ExecutorSnapshot:
         '''Capture snapshot of executor state'''
         return ExecutorSnapshot.from_executor(self)
-
-    def on_fill(self, fill: FillMsg):
-        '''
-        Event-handler for fill messages.
-        Override to implement post-fill logic.
-        '''
-        return
     
+    def _calculate_post_position(self, order: Order) -> Tuple[int, FixedPointDollars]:
+        '''
+        Calculates the post-position of the portfolio
+        if the order was filled in its entirety.
+
+        Returns (post_inventory, post_balance) tuple.
+        '''
+        is_long = (order.side == "yes" and order.action == "buy") or (order.side == "no" and order.action == "sell")
+        
+        if is_long:
+            post_inventory = self.inventory + order.count
+            if self.inventory > 0:
+                # Long++
+                post_balance = self.balance - order.count * order.yes_price_dollars
+            else:
+                # Short--
+                pairs = 1 * min(abs(self.inventory), order.count)
+                post_balance = self.balance + pairs - order.count * (order.yes_price_dollars)
+        else:
+            post_inventory = self.inventory - order.count
+            if self.inventory > 0:
+                # Long--
+                pairs = 1 * min(abs(self.inventory), order.count)
+                post_balance = self.balance + pairs - order.count * order.yes_price_dollars.complement
+            else:
+                # Short++
+                post_balance = self.balance - (order.count) * order.yes_price_dollars.complement
+
+        return post_inventory, post_balance
+
+    def constrain_order(self, order: Order):
+        '''
+        Constrains an order to the max inventory constraints.
+        '''
+        is_long = (order.side == "yes" and order.action == "buy") or (order.side == "no" and order.action == "sell")
+        
+        post_inventory, post_balance = self._calculate_post_position(order)
+        
+        inventory_constraint = order.count
+
+        if is_long:
+            if post_inventory > self.max_inventory:
+                inventory_constraint = max(0, self.max_inventory - self.inventory)
+        else:
+            if post_inventory < -self.max_inventory:
+                inventory_constraint = max(0, self.inventory + self.max_inventory)
+        
+        order.count = inventory_constraint
+        
+    async def reconcile(self):
+        '''
+        Performs whole reconciliation on order set, balance,
+        and inventory while holding the execution lock.
+        '''
+        async with self._execution_lock:
+            await self._sync_orders()
+            await self._sync_balance()
+            await self._sync_inventory()
+        
+        logger.info(f"Reconciled: inventory={self.inventory}, balance={self.balance}, orders={len(self.resting_orders)}")
+
     def update_inv_on_fill(self, fill: FillMsg):
         '''
         Updates inventory and balance according
@@ -134,7 +203,7 @@ class Executor:
         OR the balance is expected to be inaccurate,
         like after a malformed fill message.
         '''
-        balance = await asyncio.to_thread(self.get_balance)
+        balance = await self.get_balance()
         self.balance = balance
 
     async def _sync_inventory(self):
@@ -145,7 +214,7 @@ class Executor:
         OR the inventory is expected to be inaccurate,
         like after a malformed fill message.
         '''
-        response = await asyncio.to_thread(self.api.get_positions, ticker=self.market.ticker)
+        response = await self.api.get_positions(ticker=self.market.ticker)
 
         for position in response.get("market_positions", []):
             if position["ticker"] == self.market.ticker:
@@ -159,7 +228,7 @@ class Executor:
         resting orders at time of response. Called whenever orders
         need to be synced or are expected to be inaccurate.
         '''
-        response = await asyncio.to_thread(self.api.get_orders, ticker=self.market.ticker)
+        response = await self.api.get_orders(ticker=self.market.ticker)
 
         self.resting_orders.clear()
         self.unregistered_fills.clear()
@@ -169,54 +238,65 @@ class Executor:
             if order["status"] == "resting":
                 self.resting_orders[order_id] = order["remaining_count"]
 
-    async def on_inventory_mismatch(self):
-        '''
-        Syncs inventory and balance in executor.
-        To be called when inventory is expected
-        to be inaccurate.
-        '''
-        await self._sync_inventory()
-        await self._sync_balance()
-
     async def _cancel_outstanding_orders(self):
         '''
         Makes REST API request to cancel all orders
-        in resting_orders in a new thread. Clears resting
-        orders.
+        in resting_orders in a new thread. Ensures
+        resting_orders is accurate to the response.
+        Reconciles on error.
         '''
         
         if self.resting_orders:
             try:
-                response = await asyncio.to_thread(self.api.batch_cancel_orders, list(self.resting_orders))
+                response = await self.api.batch_cancel_orders(list(self.resting_orders))
                 
                 for order in response["orders"]:
                     if "error" not in order:
                         self.resting_orders.pop(order["order_id"], None)
                 
-                return self.resting_orders == {}
+                return not self.resting_orders
 
-            # Squash key errors, assumes not cleared conservatively
+            # Assumes not cleared conservatively
             except KeyError as e:
                 logger.info(f"Invalid order clear response: {e}")
+                await self.reconcile()
+                return False
             except AuthError as e:
                 logger.critical(f"Auth failed during order clear: {e}")
+                await self.reconcile()
+                return False
             except RateLimitError as e :
                 logger.error(f"Rate limit exceeded during order clear: {e}")
+                await self.reconcile()
+                return False
             except APIError as e:
                 logger.error(f"API error during order clear: {e}")
+                await self.reconcile()
+                return False
             except Exception as e:
                 logger.error(f"Unexpected exception during order clear: {e}")
+                await self.reconcile()
+                return False
         else:
             return True
     
-    async def _place_batch_order(self, orders: list[dict]):
+    async def _place_batch_order(self, orders: list[Order]):
+        '''
+        Attempts to place the orders list and maintains the
+        correctness of the resting orders and unregistered
+        fills maps. Applies order constraints before placing.
+        Triggers reconciliation on any errors during creation.
+        '''
         self.unregistered_fills.clear()
 
+        for order in orders:
+            self.constrain_order(order)
+
         try:
-            response = await asyncio.to_thread(self.api.batch_create_orders, orders)
+            response = await self.api.batch_create_orders(orders)
         except Exception:
-            # Re-sync on failure to ensure accurate orders
-            await self._sync_orders()
+            # Reconcile on failure to ensure accurate orders
+            await self.reconcile()
             return
 
         if "orders" in response:
@@ -231,21 +311,13 @@ class Executor:
                 if net_count > 0:
                     self.resting_orders[order_id] = net_count
 
-    def on_market_update(self):
-        '''
-        Event-handler for market updates.
-        Override to implement post-update
-        logic.
-        '''
-        return
-
-    def get_balance(self) -> float:
+    async def get_balance(self) -> float:
         '''
         Returns balance, in dollars, from
         REST API balance endpoint.
         '''
-        
-        return self.api.get_balance()["balance"] / 100
+        response = await self.api.get_balance()
+        return response["balance"] / 100
 
     def construct_order(self, action: str, price: FixedPointDollars, count: int) -> Order | None:
         '''
@@ -270,4 +342,21 @@ class Executor:
         
         except ValueError as e:
             return None
+    
+    @abstractmethod
+    def on_fill(self, fill: FillMsg):
+        '''
+        Event-handler for fill messages.
+        Override to implement post-fill logic.
+        '''
+        pass
+    
+    @abstractmethod
+    def on_market_update(self):
+        '''
+        Event-handler for market updates.
+        Override to implement post-update
+        logic.
+        '''
+        return
         

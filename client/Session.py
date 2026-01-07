@@ -22,12 +22,13 @@ class Session:
 
     def load_private_key_from_file(self, file_path: str):
         '''Loads private key from file_path and returns private key'''
+        
         with open(file_path, "rb") as key_file:
-            private_key = serialization.load_pem_private_key(
-            key_file.read(),
-            password=None,
-            backend=default_backend()
-        )
+                private_key = serialization.load_pem_private_key(
+                key_file.read(),
+                password=None,
+                backend=default_backend()
+                )
         return private_key
     
     def sign_pss_text(self, text: str):
@@ -53,3 +54,4 @@ class Session:
         current_time_milliseconds = int(timestamp * 1000)
         timestamp_str = str(current_time_milliseconds)
         return timestamp_str
+        

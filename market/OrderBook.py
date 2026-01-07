@@ -3,6 +3,7 @@ from typing import List, TYPE_CHECKING
 from decimal import Decimal
 from dataclasses import dataclass
 from .FixedPointDollars import FixedPointDollars, ZERO, ONE, MID_DEFAULT
+from sortedcontainers.sorteddict import SortedDict
 
 if TYPE_CHECKING:
     from client.WebsocketResponses import OrderBookDeltaMsg, OrderBookSnapshotMsg
@@ -12,22 +13,22 @@ class OrderBook:
     Mutable orderbook updated by delta messages.
     Orderbook is only valid AFTER a snapshot has been
     applied.
+
+    Snapshots apply in O(N) time.
     '''
 
     # Time where orderbook obj represents market orderbook
     timestamp: float
     
-
     # bid and ask are init to min and max values respectively
-
     best_bid: FixedPointDollars # Best bid price for given orderbook    
     bid_size: int   # Size of contract at best bid price
 
     best_ask: FixedPointDollars # Best ask for a given orderbook (calculated through complement)
     ask_size: int   # Size of contract at best ask price
 
-    yes_book: dict[FixedPointDollars, int] # Yes side of the orderbook in [price, resting_contract] key-value pairs
-    no_book: dict[FixedPointDollars, int]  # No side of the order book in [price, resting_contracts] key-value pairs.
+    yes_book: SortedDict[FixedPointDollars, int] # Yes side of the orderbook in [price, resting_contract] key-value pairs
+    no_book: SortedDict[FixedPointDollars, int]  # No side of the order book in [price, resting_contracts] key-value pairs.
 
     mid_price: FixedPointDollars      # Volume-weighted mid price
     bid_ask_spread: FixedPointDollars # Best bid-ask spread
@@ -41,8 +42,8 @@ class OrderBook:
 
         self.best_ask = ONE # Init to >max value for min logic
         self.ask_size = 0
-        self.yes_book = {}
-        self.no_book = {}
+        self.yes_book = SortedDict()
+        self.no_book = SortedDict()
 
         self.mid_price = MID_DEFAULT
         self.bid_ask_spread = ZERO
@@ -53,59 +54,45 @@ class OrderBook:
         '''
         Updates all fields of OrderBook to match snapshot.
 
+        Builds batch for each side of orderbook and then
+        batch updates the sorted dicts.
+
         Returns None.
         '''
-        # Re-init
-        self.best_bid = ZERO
-        self.best_ask = ONE
-        self.yes_book = {}
-        self.no_book = {}
-
         self.seq_n = sequence_number
-
-        if snapshot_msg.yes_dollars:
-            yes_book = snapshot_msg.yes_dollars
-        else:
-            yes_book = []
-
-        if snapshot_msg.no_dollars:
-            no_book = snapshot_msg.no_dollars
-        else:
-            no_book = []
-
-        for bid in yes_book:
-            price, size = bid
+    
+        yes_dict = {}
+        for price, size in (snapshot_msg.yes_dollars or []):
             price = FixedPointDollars(price)
+            yes_dict[price] = yes_dict.get(price, 0) + size
 
-            if price in self.yes_book:
-                self.yes_book[price] += size
-            else:
-                self.yes_book[price] = size
-
-            if price > self.best_bid:
-                self.best_bid = price
-                self.bid_size = self.yes_book[price]
-            elif price == self.best_bid:
-                self.bid_size = self.yes_book[price]
-            
-        for bid in no_book:
-            no_bid, size = bid
+        no_dict = {}
+        for no_bid, size in (snapshot_msg.no_dollars or []):
             no_bid = FixedPointDollars(no_bid)
-            price = no_bid.complement
+            no_dict[no_bid] = no_dict.get(no_bid, 0) + size
 
-            
-            if price < self.best_ask:
-                self.best_ask = price
-                self.ask_size = size
+        # Batch insert w/ order invariant
+        self.yes_book = SortedDict(yes_dict)
+        self.no_book = SortedDict(no_dict)
 
-            if no_bid in self.no_book:
-                self.no_book[no_bid] += size
-            else:
-                self.no_book[no_bid] = size
+        if self.yes_book:
+            self.best_bid = self.yes_book.keys()[-1]
+            self.bid_size = self.yes_book[self.best_bid]
+        else:
+            self.best_bid = ZERO
+            self.bid_size = 0
+
+        if self.no_book:
+            highest_no_bid = self.no_book.keys()[-1]
+            self.best_ask = highest_no_bid.complement
+            self.ask_size = self.no_book[highest_no_bid]
+        else:
+            self.best_ask = ONE
+            self.ask_size = 0
 
         self.timestamp = timestamp
         self.mid_price = self.calc_mid_price()
-        self.bid_ask_spread = self.spread()  
+        self.bid_ask_spread = self.spread() 
 
     def _apply_delta(self, timestamp: float, sequence_number: int, delta_msg: OrderBookDeltaMsg) -> None:
         '''
@@ -149,36 +136,36 @@ class OrderBook:
                 elif price.complement == self.best_ask:
                     self.ask_size = self.no_book[price]
             else:
-                self.no_book[price] = delta
-                if price.complement < self.best_ask:
-                    self.best_ask = price.complement
-                    self.ask_size = delta
+                if delta > 0:
+                    self.no_book[price] = delta
+                    if price.complement < self.best_ask:
+                        self.best_ask = price.complement
+                        self.ask_size = delta
 
         self.timestamp = timestamp
         self.mid_price = self.calc_mid_price()
         self.bid_ask_spread = self.spread()
 
     def _find_new_best_ask(self):
-        '''Placeholder O(N) best ask func'''
-        best_ask = ONE
-        ask_size = 0
+        '''Sets best_ask and ask_size based on book'''
+        if not self.no_book:
+            self.best_ask = ONE
+            self.ask_size = 0
+            return
+        
+        highest_no_bid, ask_size = self.no_book.items()[-1]
 
-        for k in self.no_book.keys():
-            if (k.complement) < best_ask:
-                best_ask = k.complement
-                ask_size = self.no_book[k]
-
-        self.best_ask = best_ask
+        self.best_ask = highest_no_bid.complement
         self.ask_size = ask_size
 
     def _find_new_best_bid(self):
-        '''Placeholder O(N) best bid func'''
-        best_bid = ZERO
-        bid_size = 0
-        for k in self.yes_book.keys():
-            if k > best_bid:
-                best_bid = k
-                bid_size = self.yes_book[k]
+        '''Sets best_bid and bid_size based on book'''
+        if not self.yes_book:
+            self.best_bid = ZERO
+            self.bid_size = 0
+            return
+        
+        best_bid, bid_size = self.yes_book.items()[-1]
         
         self.best_bid = best_bid
         self.bid_size = bid_size

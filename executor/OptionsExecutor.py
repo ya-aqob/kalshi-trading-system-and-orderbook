@@ -3,7 +3,7 @@ from client.WebsocketResponses import FillMsg
 from .Executor import Executor
 from typing import TYPE_CHECKING, List
 import asyncio
-from asyncio import Lock
+from asyncio import Lock, Event
 from derivatives_pipeline.DeribitAPI import DeribitREST, DeribitSocket
 from datetime import datetime
 import pytz
@@ -33,7 +33,8 @@ class OptionsExecutor(Executor):
     Trades on edge between true price of the market (approximated as a digital option)
     and the actual price of the bid-ask spread of the market.
 
-    Trade decisions are triggered on Deribit websocket ticks.
+    Jtilizes event-conflation on high-frequency websocket ticks
+    to generate trades on fresh edges.
     '''
     model: BSBOModel
 
@@ -42,14 +43,15 @@ class OptionsExecutor(Executor):
     prediction_expiry: float # Expiry time of the binary market in ms since unix epoch
     currency: str            # Currency name in Deribit format
 
-    _tick_lock: asyncio.Lock # Prevents repetitive tick tasks
+    # Syncronization
+    _tick_event:          asyncio.Event       # Event representing pending ticks
+    _tick_processor_task: asyncio.Task | None # Prevents repetitive tick tasks
+    _fresh_tick:          OptionTick | None   # Freshest tick yet received
+
 
     # Deribit API
     deri_rest: DeribitREST
     deri_ws: DeribitSocket
-
-    # Simulation Variables
-    sim_open_orders: List[Order]
 
     def __init__(self, kalshi_api: KalshiAPI, market: BinaryMarket, 
                  session: Session, max_inventory: int, deri_ws: DeribitSocket, 
@@ -65,7 +67,9 @@ class OptionsExecutor(Executor):
 
         self.model = model
 
-        self._tick_lock = asyncio.Lock()
+        self._tick_event = asyncio.Event()
+        self._fresh_tick = None
+        self._tick_processor_task = None
 
         self.deri_ws = deri_ws
         self.deri_rest = deri_rest
@@ -100,25 +104,44 @@ class OptionsExecutor(Executor):
     def on_tick(self, tick: OptionTick):
         '''
         Event handler for ticks in the option instrument.
-        Dispatches new tick task if one is not fired.
+        Dispatches new tick processing task if one is not running.
+        Updates freshest tick to this tick.
         '''
-        if self._tick_lock.locked():
-            return
+        self._fresh_tick = tick
+        self._tick_event.set()
 
-        asyncio.create_task(self.on_tick_action(tick))
+        if self._tick_processor_task is None or self._tick_processor_task.done():
+            self._tick_processor_task = asyncio.create_task(self._tick_processor())
+
+    async def _tick_processor(self):
+        while True:
+            try:
+                await asyncio.wait_for(self._tick_event.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                if self._fresh_tick is None:
+                    return
+                continue
+            
+            tick = self._fresh_tick
+            self._fresh_tick = None
+            self._tick_event.clear()
+        
+            if tick is not None:
+                await self.on_tick_action(tick)
 
     async def on_tick_action(self, tick: OptionTick):
         '''
-        Locked action on each tick. Cancels all outstanding
-        orders, captures states, and generates appropriate
-        order for tick, market, and executor state data.
+        Requires execution lock.
+        Cancels all outstanding orders, captures states, and generates 
+        appropriate order for tick, market, and executor state data.
         '''
-        async with self._tick_lock:
+
+        async with self._execution_lock:
             await self._cancel_outstanding_orders()
 
             market_state = self.market.snapshot()
             executor_state = self.snapshot()
-            true_price = self._generate_price_of_market(tick, market_state)
+            true_price = self._generate_price_of_market(tick)
 
             order_logger.info(f"True Price: {true_price}. Market ask: {market_state.best_ask}. Market bid: {market_state.best_bid}")
 
@@ -129,6 +152,9 @@ class OptionsExecutor(Executor):
             kelly_size = max(-self.max_inventory, min(self.max_inventory, kelly_size))
             
             pos_delta = kelly_size - inv_size
+
+            if kelly_size == 0 and pos_delta != 0:
+                return
 
             if pos_delta < 0:
                 order = self.construct_order(
@@ -146,8 +172,7 @@ class OptionsExecutor(Executor):
                 order = None
             
             if order:
-                order_dict = order.to_dict()
-                await asyncio.to_thread(self.api.batch_create_orders, [order_dict])
+                await self._place_batch_order([order])
             
     def _generate_size(self, market_state: OrderBookSnapshot, true_price: float, executor_state: ExecutorSnapshot):
         '''
@@ -178,20 +203,33 @@ class OptionsExecutor(Executor):
     def _generate_kelly_float(self, market_state: OrderBookSnapshot, true_price: float) -> float:
         '''
         Generates ratio of bankroll to have in portfolio
-        based on Kelly Criterion.
+        based on Kelly Criterion. Approximates fee cost
+        in for profits.
         Returns:
             Ideal bankroll ratio
         '''
-        if market_state.best_bid > true_price:
-            edge = market_state.best_bid - true_price
-            ratio = edge / market_state.best_bid
-        elif market_state.best_ask < true_price:
-            edge = true_price - market_state.best_ask
-            ratio = edge / (1 - market_state.best_ask)
+
+        if float(market_state.best_bid) > true_price:
+            price = market_state.best_bid
+            net_profit = price * (1 - self.market.fee_schedule.taker_fee_rate * (1 - price))
+            risk = 1 - price
+            b_adj = net_profit / risk
+
+            p = 1 - true_price
+            q = true_price
+        elif float(market_state.best_ask) < true_price:
+            price = market_state.best_ask
+            net_profit = (1 - price) * (1 - self.market.fee_schedule.taker_fee_rate * price)
+            risk = price
+            b_adj = net_profit / risk
+            p = true_price
+            q = 1 - true_price
         else:
-            ratio = 0.0
+            return 0.0
         
-        return float(ratio)
+        kelly_ratio = (float(b_adj) * p - q) / b_adj
+
+        return max(0.0, float(kelly_ratio))
 
     def _generate_price_of_market(self, tick: OptionTick):
         '''
@@ -267,75 +305,3 @@ class OptionsExecutor(Executor):
             return None
 
         return min(instruments, key=lambda x: self.calc_option_distance(x))
-
-    ###
-    ### Simulation Functions
-    ###
-
-    def simulate_cancel_orders(self):
-        self.sim_open_orders = []
-        return
-    
-    def simulate_place_orders(self, order: List[Order]):
-        orders = self.simulate_flip_sale(order)
-        
-        for o in orders:
-            if o.side == "no" and o.action == "buy" or o.side == "yes" and o.action == "sell":
-                delta = -o.count
-                order_logger.info(f"{delta:+d} @ {o.yes_price_dollars}")
-            if o.side == "no" and o.action == "sell" or o.side == "yes" and o.action == "buy":
-                order_logger.info(f"{o.count:+d} @ {o.yes_price_dollars}")
-            self.sim_open_orders.append(o)
-
-    def simulate_flip_sale(self, orders: List[Order]):
-        result = []
-        for order in orders:
-            if order.action == "sell" and order.side == "yes":
-                if order.count <= self.inventory:
-                    result.append(order)
-                elif self.inventory > 0:
-                    # Split
-                    result.append(Order(ticker=self.market.ticker, type="limit", action="sell", side="yes", count=self.inventory, yes_price_dollars=order.yes_price_dollars))
-                    result.append(Order(ticker=self.market.ticker, type="limit", action="buy", side="no", count=order.count - self.inventory, yes_price_dollars=order.yes_price_dollars))
-                else:
-                    # Full flip
-                    order.side = "no"
-                    order.action = "buy"
-                    result.append(order)
-            else:
-                result.append(order)
-        return result
-
-    def simulate_fill_logic(self, snapshot: OrderBookSnapshot):
-        '''
-        Simulates open order fill logic.
-        '''
-        for order in self.sim_open_orders[:]:
-            is_long = (order.side == "yes") == (order.action == "buy")
-            
-            if is_long and snapshot.best_ask <= order.yes_price_dollars:
-                filled = True
-            elif not is_long and snapshot.best_bid >= order.yes_price_dollars:
-                filled = True
-            else:
-                filled = False
-            
-            if filled:
-                cost = float(order.yes_price_dollars if order.side == "yes" else order.yes_price_dollars.complement)
-                count = order.count
-                delta = count if is_long else -count
-                
-                if order.action == "buy":
-                    self.balance -= count * cost
-                    if is_long and self.inventory < 0:
-                        pairs = min(count, -self.inventory)
-                        self.balance += pairs * 1.0
-                    elif not is_long and self.inventory > 0:
-                        pairs = min(count, self.inventory)
-                        self.balance += pairs * 1.0
-                else:
-                    self.balance += count * cost
-                
-                self.inventory += delta
-                self.sim_open_orders.remove(order)
-                fill_logger.info(f"{delta:+d} @ {order.yes_price_dollars}. Bal/Inv: {self.balance}/{self.inventory}")

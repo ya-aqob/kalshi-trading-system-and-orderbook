@@ -1,9 +1,10 @@
 from .Session import Session
-import requests
 from typing import Tuple, List
 import time
-from requests import JSONDecodeError
+import httpx
+from json import JSONDecodeError
 import logging
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -18,18 +19,28 @@ class AuthError(Exception):
 
 class KalshiAPI:
     '''
-    Class for Kalshi's REST API with retry logic.
-    All methods are synchronous and need to be passed to threads
-    to prevent slow blocking.
+    Async class for Kalshi's REST API with retry logic.
     No responses are type validated.
     '''
     def __init__(self, session: Session, max_retries: int = 3, retry_delay: float = .1, time_out: int = 5):
         self.session = session
         self.base_url = "https://demo-api.kalshi.co"
+        self.client = None
 
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.time_out = time_out
+
+    async def connect(self):
+        '''Init the client'''
+        if self.client is None:
+            self.client = httpx.AsyncClient()
+
+    async def close(self):
+        '''Close the client'''
+        if self.client:
+            await self.client.aclose()
+            self.client = None
 
     def _gen_headers(self, method: str, path: str) -> dict:
         '''
@@ -52,17 +63,20 @@ class KalshiAPI:
 
         return headers
     
-    def _request(self, method: str, path: str, params=None, json=None):
+    async def _request(self, method: str, path: str, params=None, json=None):
         '''
         Base request helper method with retry logic.
         Generates HTTP errors and retries on decode errors.
         Returns JSON serialization of response.      
         '''
+        if self.client is None:
+            raise RuntimeError("Client not initialized. Must be connected first.")
+
         url = self.base_url + path
         for attempt in range(self.max_retries):
             try:
                 headers = self._gen_headers(method=method, path=path)
-                response = requests.request(
+                response = await self.client.request(
                     method=method,
                     url=url,
                     headers=headers,
@@ -75,36 +89,34 @@ class KalshiAPI:
                     return response.json()
                 except JSONDecodeError as e:
                     logger.error(f"Response decode error: {e}")
+                    continue
 
-            except requests.exceptions.Timeout:
+            except httpx.TimeoutException:
                 if attempt < self.max_retries - 1:
-                    time.sleep(self.retry_delay * (2 ** attempt))
+                    await asyncio.sleep(self.retry_delay * (2 ** attempt))
                     continue
                 raise APIError("Request timed out")
-            except requests.exceptions.HTTPError as e:
-                if response:
-                    status_code = response.status_code
+            except httpx.HTTPStatusError as e:
+                status_code = e.response.status_code
 
-                    if status_code == 401:
-                        raise AuthError("Authentication failed") from e
-                    elif status_code == 429:
-                        raise RateLimitError("Rate limit exceeded") from e
-                    elif status_code >= 500 and attempt < self.max_retries - 1:
-                        time.sleep(self.retry_delay * (2 ** attempt))
-                        continue
-                    else:
-                        raise APIError(f"API error ({status_code}): {e}") from e
+                if status_code == 401:
+                    raise AuthError("Authentication failed") from e
+                elif status_code == 429:
+                    raise RateLimitError("Rate limit exceeded") from e
+                elif status_code >= 500 and attempt < self.max_retries - 1:
+                    await asyncio.sleep(self.retry_delay * (2 ** attempt))
+                    continue
                 else:
-                    raise APIError(f"Unexpected API Error: {e}")
-            except requests.exceptions.RequestException as e:
+                    raise APIError(f"API error ({status_code}): {e}") from e
+            except httpx.RequestError as e:
                 if attempt < self.max_retries - 1:
-                    time.sleep(self.retry_delay)
+                    await asyncio.sleep(self.retry_delay)
                     continue
                 raise APIError(f"Network error: {e}") from e
 
         raise APIError("Max retries exceeded")
 
-    def get_orders(self, ticker: str | None = None, event_ticker:str | None = None, min_ts: int | None = None, max_ts: int| None = None, status: str | None = None, limit: int=100, cursor: str | None = None):
+    async def get_orders(self, ticker: str | None = None, event_ticker:str | None = None, min_ts: int | None = None, max_ts: int| None = None, status: str | None = None, limit: int=100, cursor: str | None = None):
         '''
         Makes GET request to get_orders endpoint.
         Generates HTTP status errors.
@@ -124,11 +136,11 @@ class KalshiAPI:
         }
 
         payload = {k: v for k, v in payload.items() if v is not None}
-        response = self._request(method="GET", path=path, params=payload)
+        response = await self._request(method="GET", path=path, params=payload)
         
         return response
 
-    def get_positions(self, cursor: str| None =None, limit: int  = 100, count_filter: str | None = None, ticker: str | None = None, event_ticker: str | None = None):
+    async def get_positions(self, cursor: str| None =None, limit: int  = 100, count_filter: str | None = None, ticker: str | None = None, event_ticker: str | None = None):
         '''
         Makes GET request to get_positions endpoint.
         Generates HTTP status errors.
@@ -146,11 +158,11 @@ class KalshiAPI:
         }
 
         payload = {k: v for k, v in payload.items() if v is not None}
-        response = self._request(method="GET", path=path, params=payload)
+        response = await self._request(method="GET", path=path, params=payload)
 
         return response
 
-    def get_balance(self):
+    async def get_balance(self):
         '''
         Makes GET request to get_balance endpoint.
         Generates HTTP status errors.
@@ -159,11 +171,11 @@ class KalshiAPI:
         '''
         path = '/trade-api/v2/portfolio/balance'
 
-        response = self._request(method="GET", path=path)
+        response = await self._request(method="GET", path=path)
 
         return response
     
-    def get_market_orderbook(self, ticker: str, depth: int = 0):
+    async def get_market_orderbook(self, ticker: str, depth: int = 0):
         '''
         Makes GET request to get_market_orderbook endpoint.
         Generates HTTP status error.
@@ -173,11 +185,11 @@ class KalshiAPI:
         path = f'/trade-api/v2/markets/{ticker}/orderbook'
         params = {"depth": depth}
 
-        response = self._request(method="GET", path=path, params=params)
+        response = await self._request(method="GET", path=path, params=params)
 
         return response
     
-    def batch_create_orders(self, orders: List[dict]):
+    async def batch_create_orders(self, orders: List[dict]):
         '''
         Makes POST request to batch_create_orders endpoint.
         Generates HTTP status errors.
@@ -188,12 +200,12 @@ class KalshiAPI:
 
         payload = {"orders": orders}
 
-        response = self._request(method="POST", path=path, json=payload)
+        response = await self._request(method="POST", path=path, json=payload)
 
         
         return response
 
-    def batch_cancel_orders(self, orders: List[str]):
+    async def batch_cancel_orders(self, orders: List[str]):
         '''
         Makes DELETE request to batch_delete_orders endpoint.
         Generates HTTP status errors.
@@ -204,11 +216,11 @@ class KalshiAPI:
 
         payload = {"ids": orders}
 
-        response = self._request(method="DELETE", path=path, json=payload)
+        response = await self._request(method="DELETE", path=path, json=payload)
 
         return response
 
-    def get_event(self, event_ticker: str):
+    async def get_event(self, event_ticker: str):
         '''
         Makes GET request to get_event endpoint.
         Generates HTTP status errors.
@@ -217,11 +229,11 @@ class KalshiAPI:
         '''
         path = f'/trade-api/v2/events/{event_ticker}'
 
-        response = self._request(method="GET", path=path)
+        response = await self._request(method="GET", path=path)
 
         return response
     
-    def get_market(self, market_ticker: str):
+    async def get_market(self, market_ticker: str):
         '''
         Makes GET request to markets endpoint.
         Generates HTTP status errors.
@@ -231,11 +243,11 @@ class KalshiAPI:
 
         path = f'/trade-api/v2/markets/{market_ticker}'
 
-        response = self._request(method="GET", path=path)
+        response = await self._request(method="GET", path=path)
         
         return response
 
-    def get_user_data_timestamp(self):
+    async def get_user_data_timestamp(self):
         '''
         Makes GET request to get_user_data_timestamp endpoint.
         Generates HTTP status errors.
@@ -244,6 +256,6 @@ class KalshiAPI:
         '''
         path = '/trade-api/v2/exchange/user_data_timestamp'
 
-        response = self._request(method="GET", path=path)
+        response = await self._request(method="GET", path=path)
 
         return response

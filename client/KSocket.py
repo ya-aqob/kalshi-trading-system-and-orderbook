@@ -306,7 +306,7 @@ class KalshiWebsocket:
                 self.executor.on_fill(envelope.msg)
 
         except ValidationError as e:
-            await self.executor.on_inventory_mismatch()
+            await self.executor.reconcile()
         
         if msg_type == "error":
             code = data.get('msg', {}).get('code')

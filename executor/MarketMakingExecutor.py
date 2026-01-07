@@ -23,11 +23,15 @@ class MarketMakingExecutor(Executor):
     binary prediction markets that is compatible with
     any market-making model that subclasses Model.
 
-    Triggers quote placement on market update and
-    fills.
+    Utilizes event-conflation pattern for high-frequency
+    fills and updates to debounce quote generation and
+    ensure fresh quotes.
     '''
     
-    quote_size: int # Standard size of each quote (in number of contracts)
+    quote_size: int                             # Standard size of each quote (in number of contracts)
+    _update_event: asyncio.Event                # Event representing a pending update
+    _update_processor_task: asyncio.Task | None # Task for processing ticks
+
 
     def __init__(self, api: KalshiAPI, model: Model, market: BinaryMarket, session: Session, runtime: int, max_inventory: int, quote_size: int = 1):
         
@@ -36,33 +40,22 @@ class MarketMakingExecutor(Executor):
         self.quote_size = quote_size
         self.model = model
         
+        self._update_event = asyncio.Event()
+        self._update_processor_task = None
+
         self.terminal_time = time.time() + runtime
         self.runtime = runtime
     
-    def on_fill(self, fill: FillMsg):
-        '''
-        Updates inv on FillMsg then fire-and-forgets
-        an attempt at quote execution.
-        '''
-        self.update_inv_on_fill(fill)
-
-        # Guard against insufficient volatility data
-        if self.should_attempt_quote():
-            asyncio.create_task(self._attempt_execute_quote())
-    
     async def _attempt_execute_quote(self):
         '''
-        Attempts to execute quotes. Does nothing if can't acquire lock.
+        Requires execution lock.
         Makes REST API call to cancel outstanding orders and yields.
         Captures context AFTER call returns and checks _should_quote
         conditions. Places quote IFF should quote.
         '''
-        if self.quote_lock.locked():
-            return
-
-        async with self.quote_lock:
+        async with self._execution_lock:
             success = await self._cancel_outstanding_orders()
-            
+        
             # Exit on failure of cancellation, reduce open order exposure
             if not success:
                 return
@@ -74,7 +67,7 @@ class MarketMakingExecutor(Executor):
                 return
             
             bid, ask = self.model.generate_quotes(ctx.orderbook_snapshot, ctx.executor_snapshot.inventory, 
-                                                  ctx.volatility)
+                                                    ctx.volatility)
 
             await self._place_quote(bid, ask, ctx.executor_snapshot)
 
@@ -155,16 +148,51 @@ class MarketMakingExecutor(Executor):
             ask_order = self.construct_order(action="sell", price=ask_quote, count=ask_size)
             
             if ask_order is not None:
-                batch.append(ask_order.to_dict())
+                batch.append(ask_order)
         
         if not batch:
             return
         
         await self._place_batch_order(batch)
     
+    def on_fill(self, fill: FillMsg):
+        '''
+        Updates inv on FillMsg then triggers
+        quote process.
+        '''
+        self.update_inv_on_fill(fill)
+        self.trigger_process()
+
     def on_market_update(self):
         '''
         Public entrypoint for post-market-update logic.
-        To be wired to market for event-driven quoting.
+        Initiates quote trigger process.
         '''
-        asyncio.create_task(self._attempt_execute_quote()) 
+        self.trigger_process()
+    
+    def trigger_process(self):
+        '''
+        Checks quote conditions, sets event flag,
+        and spawns processing task if one is not running.
+        '''
+        if not self.should_attempt_quote():
+            return
+
+        self._update_event.set()
+
+        if self._update_processor_task is None or self._update_processor_task.done():
+            self._update_processor_task = asyncio.create_task(self._update_processor()) 
+
+    async def _update_processor(self):
+        '''
+        Update processor that triggers quote execution.
+        Expects event flag within 1 second else exits.
+        '''
+        while True:
+            try:
+                await asyncio.wait_for(self._update_event.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                return
+            
+            self._update_event.clear()
+            await self._attempt_execute_quote()

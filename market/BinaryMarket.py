@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING, Optional
 import asyncio
 import numpy as np
 
+from .FeeSchedule import KalshiFeeSchedule
 from .PriceBuffer import PriceBuffer
 from .OrderBookSnapshot import OrderBookSnapshot
 from .OrderBook import OrderBook
@@ -18,24 +19,29 @@ class BinaryMarket:
 
     Provides on_update_callback to allow for connection executor update logic.
     '''
-    ticker: str                  # The ticker of the BinaryPrediction Market
+    ticker: str                     # The ticker of the BinaryPrediction Market
 
-    price_window: PriceBuffer    # history of prices in sequence number order, [price, timestamp] pairs
-    orderbook: OrderBook         # The mutable orderbook representing the market
+    price_window: PriceBuffer       # history of prices in sequence number order, [price, timestamp] pairs
+    orderbook: OrderBook            # The mutable orderbook representing the market
 
-    volatility: float | None     # Volatility over price_window, None if price_window is not full
+    volatility: float | None        # Volatility over price_window, None if price_window is not full
+    
+    fee_schedule: KalshiFeeSchedule # Fee schedule specific to the market
 
-    def __init__(self, ticker: str, volatility_window: int, on_gap_callback=None, on_update_callback=None):
+    def __init__(self, ticker: str, volatility_window: int, on_gap_callback=None, on_update_callback=None,
+                 taker_fee_rate=.07, maker_fee_rate=.0175):
         
+        self.orderbook = OrderBook()
+        self.fee_schedule = KalshiFeeSchedule(taker_fee_rate=taker_fee_rate, maker_fee_rate=maker_fee_rate)
         self.price_window = PriceBuffer(max_size=volatility_window)
+
         self.volatility_window = volatility_window
+        self.volatility = None
         self.ticker = ticker
 
         self.on_gap_callback = on_gap_callback
         self.on_update_callback = on_update_callback
-        self.orderbook = OrderBook()
-
-        self.volatility = None
+        
 
     async def update(self, timestamp: float, update: OrderBookSnapshotEnvelope | OrderBookDeltaEnvelope) -> None:
         '''
