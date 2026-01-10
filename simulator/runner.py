@@ -1,9 +1,13 @@
 import asyncio
-
+from derivatives_pipeline.DeribitAPI import DeribitREST, DeribitSocket
 from client import Session, KalshiWebsocket
 from market import BinaryMarket
-from model import Model
-from .SimExecutor import SimulatorExecutor
+from model.BSBOModel import BSBOModel
+from executor.OptionsExecutorSimulator import OptionsExecutorSimulator
+from client.API import KalshiAPI
+from client.KSocket import KalshiWebsocket
+from currency_pipeline.ParkinsonVolatility import VolatilityEstimator
+from currency_pipeline.BinanceAPI import BinanceAPI
 
 class SimulationRunner:
 
@@ -11,42 +15,53 @@ class SimulationRunner:
 
         self.config = config
 
-        self.market = None
-        self.ws = None
-        self.market = None
-        self.model = None
-        self.executor = None
-        self._running = False
-
     def _build(self):
         '''
         Configures all objects and wire dependencies.
         '''
-        self.session = Session(self.config["private_key_path"], self.config["access_key"])
+        self.demo_session = Session(self.config["demo_private_key_path"], 
+                               self.config["demo_access_key"]
+                               )
+        self.session = Session(self.config["private_key_path"], 
+                               self.config["access_key"]
+                               )
+        self.bsbo_model = BSBOModel()
 
-        self.model = Model(k=self.config["k"], G=self.config["gamma"], runtime=self.config["runtime"])
+        self.market = BinaryMarket(ticker=self.config["ticker"], 
+                                   volatility_window=self.config["volatility_window"],
+                                    on_gap_callback=None,
+                                    on_update_callback=None
+                                    )
+        
+        self.dbit_rest = DeribitREST()
+        self.dbit_ws = DeribitSocket()
+        
+        self.ks_api = KalshiAPI(session=self.demo_session)
+        self.ks_ws = KalshiWebsocket(session=self.session)
 
-        self.market = BinaryMarket(ticker=self.config["ticker"], volatility_window=self.config["volatility_window"],
-                                    on_gap_callback=None)
+        self.ks_ws.set_market(self.market)
 
-        self.executor = SimulatorExecutor(
-            api=None,
-            model=self.model,
+        self.vol = VolatilityEstimator(api=BinanceAPI())
+
+        self.executor = OptionsExecutorSimulator(
+            kalshi_api=self.ks_api,
             market=self.market,
-            session=None,
-            runtime=self.config["runtime"],
-            max_inventory=self.config["max_inventory"],
-            start_balance=self.config["start_balance"]
-        )
-
-        self.websocket = KalshiWebsocket(
             session=self.session,
-            max_retries=5
+            max_inventory=self.config["max_inventory"],
+            min_edge=self.config["min_edge"],
+            deri_ws = self.dbit_ws,
+            deri_rest=self.dbit_rest,
+            currency=self.config["currency"],
+            strike=self.config["strike"],
+            expiry_datetime=self.config["expiry_datetime"],
+            model=self.bsbo_model,
+            vol_est=self.vol
         )
 
-        self.market.set_executor(self.executor)
-        self.market.on_gap_callback = self.websocket._handle_gap
-        self.websocket.set_market(self.market)
+        self.dbit_ws.on_tick = self.executor.on_tick
+        self.ks_ws.set_executor(self.executor)
+        self.market.on_update_callback = self.executor.on_market_update
+        
 
     async def start(self):
         '''
@@ -56,11 +71,17 @@ class SimulationRunner:
         self._build()
         self._running = True
         
-        await self.websocket.connect()
-        await self.websocket.subscribe_orderbook(self.config["ticker"])
-    
+        await self.ks_ws.connect()
+        await self.ks_ws.subscribe_orderbook(self.config["ticker"])
+        await self.executor.configure()
+        await self.vol.api.connect()
+        await self.vol.init_candles()
+
         try:
-            await self.websocket.run()
+            await asyncio.gather(
+            self.ks_ws.run(),
+            self.dbit_ws.connect()
+            )
         except asyncio.CancelledError:
             pass
     
@@ -69,7 +90,10 @@ class SimulationRunner:
         End websocket.
         '''
         self._running = False
-        await self.websocket.close()
+        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
     
     def get_results(self) -> dict:
         '''
@@ -77,8 +101,6 @@ class SimulationRunner:
         attributes.
         '''
         return {
-            "trade_history": self.executor.trade_history,
             "final_balance": self.executor.balance,
             "final_inventory": self.executor.inventory,
-            "num_trades": len(self.executor.trade_history)
         }

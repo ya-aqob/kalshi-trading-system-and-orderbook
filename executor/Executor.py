@@ -6,7 +6,7 @@ from market import Order, FixedPointDollars
 from market.FixedPointDollars import MAX_PRICE, MIN_PRICE, MID_DEFAULT
 from executor import Context
 from abc import ABC, abstractmethod
-
+import math
 import asyncio
 import logging
 
@@ -131,7 +131,25 @@ class Executor(ABC):
             if post_inventory < -self.max_inventory:
                 inventory_constraint = max(0, self.inventory + self.max_inventory)
         
-        order.count = inventory_constraint
+        balance_constraint = self.max_inventory
+
+        
+        if order.action == "buy":
+            if is_long:
+                price = order.count * order.yes_price_dollars
+                if price > self.balance:
+                    balance_constraint = math.floor(self.balance / float(order.yes_price_dollars))
+            else:
+                price = order.count * order.yes_price_dollars.complement
+                if price > self.balance:
+                    balance_constraint = math.floor(self.balance / float(order.yes_price_dollars.complement))
+        elif order.action == "sell":
+            if self.inventory < order.count:
+                cost_per_no = float(order.yes_price_dollars.complement)
+                affordable_shorts = math.floor(self.balance / cost_per_no) if cost_per_no > 0 else 0
+                balance_constraint = max(0, self.inventory) + affordable_shorts 
+
+        order.count = min(inventory_constraint, balance_constraint)
         
     async def reconcile(self):
         '''

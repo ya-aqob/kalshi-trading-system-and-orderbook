@@ -25,12 +25,12 @@ class OptionsExecutorSimulator(OptionsExecutor):
     sim_open_orders: List[Order]
 
     def __init__(self, kalshi_api: KalshiAPI, market: BinaryMarket, 
-                 session: Session, max_inventory: int, deri_ws: DeribitSocket, 
+                 session: Session, max_inventory: int, min_edge: float, deri_ws: DeribitSocket, 
                  deri_rest: DeribitREST, currency: str, strike: float, expiry_datetime: str,
-                 model: BSBOModel
+                 model: BSBOModel, vol_est
                  ):
-        super().__init__(kalshi_api, market, session, max_inventory, deri_ws, deri_rest, currency, strike, expiry_datetime,
-                         model)
+        super().__init__(kalshi_api, market, session, max_inventory, min_edge, deri_ws, deri_rest, currency, strike, expiry_datetime,
+                         model, vol_est)
         
         self.sim_open_orders = []
 
@@ -65,16 +65,19 @@ class OptionsExecutorSimulator(OptionsExecutor):
     
     def simulate_place_orders(self, order: List[Order]):
         orders = self.simulate_flip_sale(order)
-        
         for o in orders:
-            if o.side == "no" and o.action == "buy" or o.side == "yes" and o.action == "sell":
-                delta = -o.count
-                order_logger.info(f"{delta:+d} @ {o.yes_price_dollars}")
-            if o.side == "no" and o.action == "sell" or o.side == "yes" and o.action == "buy":
-                order_logger.info(f"{o.count:+d} @ {o.yes_price_dollars}")
-            self.sim_open_orders.append(o)
+            self.constrain_order(o)
 
-    def simulate_flip_sale(self, orders: List[Order]):
+        for o in orders:
+            if o.count != 0:
+                if o.side == "no" and o.action == "buy" or o.side == "yes" and o.action == "sell":
+                    delta = -o.count
+                    order_logger.info(f"{delta:+d} @ {o.yes_price_dollars}")
+                if o.side == "no" and o.action == "sell" or o.side == "yes" and o.action == "buy":
+                    order_logger.info(f"{o.count:+d} @ {o.yes_price_dollars}")
+                self.sim_open_orders.append(o)
+
+    def simulate_flip_sale(self, orders: List[Order]) -> List[Order]:
         '''
         Flips orders if necessary to represent
         the likely fill order/implementation for a 
@@ -83,19 +86,67 @@ class OptionsExecutorSimulator(OptionsExecutor):
         result = []
         for order in orders:
             if order.action == "sell" and order.side == "yes":
+                # Selling YES (going short / closing long)
                 if order.count <= self.inventory:
+                    # Have enough long YES to sell
                     result.append(order)
                 elif self.inventory > 0:
-                    # Split
-                    result.append(Order(ticker=self.market.ticker, type="limit", action="sell", side="yes", count=self.inventory, yes_price_dollars=order.yes_price_dollars))
-                    result.append(Order(ticker=self.market.ticker, type="limit", action="buy", side="no", count=order.count - self.inventory, yes_price_dollars=order.yes_price_dollars))
+                    # Split: sell existing YES, buy NO for remainder
+                    result.append(Order(
+                        ticker=self.market.ticker,
+                        type="limit",
+                        action="sell",
+                        side="yes",
+                        count=self.inventory,
+                        yes_price_dollars=order.yes_price_dollars
+                    ))
+                    result.append(Order(
+                        ticker=self.market.ticker,
+                        type="limit",
+                        action="buy",
+                        side="no",
+                        count=order.count - self.inventory,
+                        yes_price_dollars=order.yes_price_dollars
+                    ))
                 else:
-                    # Full flip
+                    # No YES inventory, flip entirely to buying NO
                     order.side = "no"
                     order.action = "buy"
                     result.append(order)
+
+            elif order.action == "sell" and order.side == "no":
+                # Selling NO (going long / closing short)
+                short_position = -self.inventory  # NO contracts held when short
+                if short_position >= order.count:
+                    # Have enough short position to sell NO
+                    result.append(order)
+                elif short_position > 0:
+                    # Split: sell existing NO (close short), buy YES for remainder
+                    result.append(Order(
+                        ticker=self.market.ticker,
+                        type="limit",
+                        action="sell",
+                        side="no",
+                        count=short_position,
+                        yes_price_dollars=order.yes_price_dollars
+                    ))
+                    result.append(Order(
+                        ticker=self.market.ticker,
+                        type="limit",
+                        action="buy",
+                        side="yes",
+                        count=order.count - short_position,
+                        yes_price_dollars=order.yes_price_dollars
+                    ))
+                else:
+                    # No short position, flip entirely to buying YES
+                    order.side = "yes"
+                    order.action = "buy"
+                    result.append(order)
+
             else:
                 result.append(order)
+        
         return result
 
     def simulate_fill_logic(self, snapshot: OrderBookSnapshot):

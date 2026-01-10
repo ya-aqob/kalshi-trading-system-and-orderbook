@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from derivatives_pipeline.DeribitResponse import Instrument
     from model.BSBOModel import BSBOModel
     from .ExecutorSnapshot import ExecutorSnapshot
+    from currency_pipeline.ParkinsonVolatility import VolatilityEstimator
 
 
 class OptionsExecutor(Executor):
@@ -54,13 +55,14 @@ class OptionsExecutor(Executor):
     deri_ws: DeribitSocket
 
     def __init__(self, kalshi_api: KalshiAPI, market: BinaryMarket, 
-                 session: Session, max_inventory: int, deri_ws: DeribitSocket, 
+                 session: Session, max_inventory: int, min_edge: float, deri_ws: DeribitSocket, 
                  deri_rest: DeribitREST, currency: str, strike: float, expiry_datetime: str,
-                 model: BSBOModel
+                 model: BSBOModel, v_estimator: VolatilityEstimator
                  ):
         
         super().__init__(kalshi_api, market, session, max_inventory)
 
+        self.min_edge = min_edge
         self.currency = currency
         self.prediction_expiry = self._convert_est_to_timestamp(expiry_datetime)
         self.prediction_strike = strike
@@ -73,6 +75,8 @@ class OptionsExecutor(Executor):
 
         self.deri_ws = deri_ws
         self.deri_rest = deri_rest
+
+        self.v_estimator = v_estimator
 
         self.sim_open_orders = []
 
@@ -138,38 +142,61 @@ class OptionsExecutor(Executor):
 
         async with self._execution_lock:
             await self._cancel_outstanding_orders()
+            
+            if (time.time() - self.v_estimator.timestamp) >= 300:
+                await self.v_estimator.add_candle()
 
             market_state = self.market.snapshot()
             executor_state = self.snapshot()
-            true_price = self._generate_price_of_market(tick)
+            volatility = self.v_estimator.estimate_vol()
+
+            true_price = self._generate_price_of_market(tick, volatility)
 
             order_logger.info(f"True Price: {true_price}. Market ask: {market_state.best_ask}. Market bid: {market_state.best_bid}")
 
             inv_size = executor_state.inventory
             
-            kelly_size = self._generate_size(market_state, true_price, executor_state)
-            
-            kelly_size = max(-self.max_inventory, min(self.max_inventory, kelly_size))
-            
-            pos_delta = kelly_size - inv_size
-
-            if kelly_size == 0 and pos_delta != 0:
-                return
-
-            if pos_delta < 0:
-                order = self.construct_order(
-                    action="sell",
-                    price=market_state.best_bid,
-                    count=-int(pos_delta)
-                )
-            elif pos_delta > 0:
+            if true_price > market_state.best_ask + self.min_edge:
+                space = max(0, self.max_inventory - self.inventory)
+                count = min(10, space)
                 order = self.construct_order(
                     action="buy",
                     price=market_state.best_ask,
-                    count=int(pos_delta)
+                    count=count
+                )
+            elif true_price < market_state.best_bid - self.min_edge:
+                space = max(0, self.inventory + self.max_inventory)
+                count = min(10, space)
+                order = self.construct_order(
+                    action="sell",
+                    price=market_state.best_bid,
+                    count=count
                 )
             else:
                 order = None
+            # kelly_size = self._generate_size(market_state, true_price, executor_state)
+            
+            # kelly_size = max(-self.max_inventory, min(self.max_inventory, kelly_size))
+            
+            # pos_delta = kelly_size - inv_size
+
+            # if kelly_size == 0 and pos_delta != 0:
+            #     return
+
+            # if pos_delta < 0:
+            #     order = self.construct_order(
+            #         action="sell",
+            #         price=market_state.best_bid,
+            #         count=-int(pos_delta)
+            #     )
+            # elif pos_delta > 0:
+            #     order = self.construct_order(
+            #         action="buy",
+            #         price=market_state.best_ask,
+            #         count=int(pos_delta)
+            #     )
+            # else:
+            #     order = None
             
             if order:
                 await self._place_batch_order([order])
@@ -231,7 +258,7 @@ class OptionsExecutor(Executor):
 
         return max(0.0, float(kelly_ratio))
 
-    def _generate_price_of_market(self, tick: OptionTick):
+    def _generate_price_of_market(self, tick: OptionTick, volatility: float):
         '''
         Generates the true price of the prediction market
         according to the Black-Scholes Binary Option
@@ -247,7 +274,7 @@ class OptionsExecutor(Executor):
             spot=tick.underlying_price,
             strike=self.prediction_strike,
             t_terminal=(self.prediction_expiry - (time.time() * 1000)) / (3.156e+10),
-            implied_sig=(instrument_iv/100)
+            implied_sig=(volatility)
         )
 
         return market_price
