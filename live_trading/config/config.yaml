@@ -1,0 +1,32 @@
+
+kalshi_authentication_config:
+  path_to_private_key: "secret/Trading.txt"
+  access_key: "20001a26-f095-4ac7-90e5-bf3d375ec795"
+
+kalshi_market_config:
+  kalshi_ticker: "KXETHD-26JAN1220-T3099.99"
+  volatility_window: 100
+  strike: 3100
+  expiry_datetime: "20:00 01/12/2026"
+
+signal_config:
+  signal_channels: ["index.ETHUSD-INDEX"]
+
+risk_profile:
+  trading_parameters:
+    minimum_edge: .03
+
+  portfolio_limits:
+    max_inventory: 30               # number of contracts
+    max_inventory_dev: 5            # number of contracts
+    minimum_balance: 0              # float dollars
+    max_balance_dev: 5              # float dollars
+    terminal_exit_time: 2700        # seconds
+
+  staleness_limits:
+    reconciliation_period: 300      # seconds
+    maximum_orderbook_staleness: 20 # seconds
+
+logger_config:
+  logger_list: ["runner", "execution", "ks_rest", "kalshi_websocket", "binance_rest", "crypto_websocket", "pricing_decisions"]
+  console_outs: ["runner", "execution"]
