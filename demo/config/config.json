@@ -1,14 +1,14 @@
 {
   "kalshi_authentication_config": {
-    "path_to_private_key": "secret/Trading.txt",
-    "access_key": "20001a26-f095-4ac7-90e5-bf3d375ec795"
+    "path_to_private_key": "",
+    "access_key": ""
   },
   "kalshi_market_config": {
-    "kalshi_ticker": "KXETHD-26JAN1700-T3289.99",
-    "volatility_window": 100,
-    "strike": 3289.99,
-    "expiry_datetime": "2026-01-17T05:00:00Z",
-    "starting_balance": 50
+    "kalshi_ticker": "",
+    "volatility_window": 0,
+    "strike": 0,
+    "expiry_datetime": "",
+    "starting_balance": 0
   },
   "signal_config": {
     "signal_channels": [
@@ -24,7 +24,7 @@
       "max_inventory_dev": 5,
       "minimum_balance": 0,
       "max_balance_dev": 5,
-      "terminal_exit_time": 1800
+      "terminal_exit_time": 0
     },
     "staleness_limits": {
       "reconciliation_period": 300,
