@@ -27,15 +27,15 @@ All trading activity is constrained by a set of configurable parameters and risk
 ### Prerequisites 
 
 1. Python3 (version 3.13 or later)
-2. A **READ-ONLY** Kalshi API key
+2. A venv with the packages in `requirements.txt` installed.
+3. A **READ-ONLY** Kalshi API key
    1. Follow [these instructions](https://docs.kalshi.com/getting_started/api_keys) to create a new key if necessary
 
 ### Running the Demo
 
-1. Clone the repository, create a virtual environment, and install the packages in ```requirements.txt```. 
-2. Change the working directory to this project's root directory.
-3. Edit the ```path_to_private_key``` and ```access_key``` fields in ```demo/config/config.json``` to match the relative path to your private key file and the access key associated with the private key.
-4. Run ```demo/run_demo.sh index <runtime> <starting_balance>``` to start the demo simulation.
+1. Change the working directory to this project's root directory.
+2. Edit the ```path_to_private_key``` and ```access_key``` fields in ```demo/config/config.json``` to match the relative path to your private key file and the access key associated with the private key.
+3. Run ```demo/run_demo.sh index <runtime> <starting_balance>``` to start the demo simulation.
    1. Runtime is the duration of the trading session in seconds (it must end before the market resolves)
    2. Starting balance is the desired starting balance of the simulation account (~50 is a good base balance)
 
@@ -56,3 +56,22 @@ The executor is the trading agent responsible for trading decisions, order place
 ### The Signals
 
 Signal pipelines are specific to the trading strategy being implemented. One example included in the repository is the currency_pipeline which provides orderbook ticks and index ticks for cryptocurrencies through the Crypto.com API. Signals primarily interact/trigger trading decisions in the executor through specific-to-strategy hooks and callbacks.
+
+## Live Trading (WIP)
+
+The system supports live trading on Kalshi markets through a funded user account. The default trading strategy implemented in `live_trading` is the same as the demo strategy. Strategies can be changed by instantiating a different Executor agent in the `session_runner` and wiring all of the necessary dependencies accordingly.
+
+### Prerequisites
+
+1. Python3 (version 3.13 or later)
+2. A venv with the packages in `requirements.txt` installed.
+3. A **READ AND WRITE** Kalshi API key
+   1. Follow [these instructions](https://docs.kalshi.com/getting_started/api_keys) to create a new key if necessary
+4. Funds in the Kalshi account associated with the key
+
+### Start Trading
+
+1. Configure `live_trading/config/config.yaml` with the desired portfolio risk bounds and API key specifics.
+2. Go to [Kalshi](https://kalshi.com/) and select the desired Crypto market to trade in.
+3. Input the market specifics in `live_trading/config/config.yaml`.
+4. Run `python3 -m live_trading.runner.run` from the project root directory.
