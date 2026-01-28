@@ -73,5 +73,6 @@ The system supports live trading on Kalshi markets through a funded user account
 
 1. Configure `live_trading/config/config.yaml` with the desired portfolio risk bounds and API key specifics.
 2. Go to [Kalshi](https://kalshi.com/) and select the desired Crypto market to trade in.
-3. Input the market specifics in `live_trading/config/config.yaml`.
-4. Run `python3 -m live_trading.runner.run` from the project root directory.
+3. Ensure that **Flip sell** is enabled in the account settings.
+4. Input the market specifics in `live_trading/config/config.yaml`.
+5. Run `python3 -m live_trading.runner.run` from the project root directory.
