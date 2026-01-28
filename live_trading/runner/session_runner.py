@@ -4,8 +4,8 @@ from core.client import KalshiAuthentication, KalshiAPI, KalshiWebsocket
 from core.model import BSBOModel
 from core.market import BinaryMarket
 from core.currency_pipeline import BinanceAPI, CryptoWebsocket, VolatilityEstimator
-from core.executor import OptionsExecutorSimulator
-from .RiskExceptions import *
+from core.executor import OptionsExecutor
+from ..RiskExceptions import *
 import time
 import logging
 

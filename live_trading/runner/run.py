@@ -36,7 +36,7 @@ def setup_logging(runner: TradingSessionRunner):
 
 
 async def main():
-    runner = TradingSessionRunner("demo/config/config.json")
+    runner = TradingSessionRunner("live_trading/config/config.yaml")
     setup_logging(runner)
     
     shutdown_event = asyncio.Event()
