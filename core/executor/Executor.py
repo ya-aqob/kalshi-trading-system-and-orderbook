@@ -40,7 +40,7 @@ class Executor(ABC):
     # Composition Elements
     api:     KalshiAPI
     market:  BinaryMarket
-    session: Session
+    session: KalshiAuthentication
 
     # Risk profile
     max_inventory: int     # The maximum allowed size of inventory at any given time
@@ -62,7 +62,7 @@ class Executor(ABC):
     # Synchronization
     _execution_lock: asyncio.Lock # Lock held for any state reconciliation and trading action
 
-    def __init__(self, api: KalshiAPI, market: BinaryMarket, session: Session, max_inventory: int,
+    def __init__(self, api: KalshiAPI, market: BinaryMarket, session: KalshiAuthentication, max_inventory: int,
                  minimum_balance: float, max_inventory_dev: int, max_balance_dev: float):
         
         self.minimum_balance = minimum_balance
