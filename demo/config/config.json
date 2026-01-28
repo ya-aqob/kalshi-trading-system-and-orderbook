@@ -5,7 +5,7 @@
   },
   "kalshi_market_config": {
     "kalshi_ticker": "",
-    "volatility_window": 0,
+    "volatility_window": 100,
     "strike": 0,
     "expiry_datetime": "",
     "starting_balance": 0
@@ -24,7 +24,7 @@
       "max_inventory_dev": 5,
       "minimum_balance": 0,
       "max_balance_dev": 5,
-      "terminal_exit_time": 0
+      "terminal_exit_time": 2400
     },
     "staleness_limits": {
       "reconciliation_period": 300,
