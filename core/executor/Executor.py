@@ -11,7 +11,6 @@ from live_trading.RiskExceptions import *
 
 if TYPE_CHECKING:
     from core.market import BinaryMarket
-    from core.model import Model
     from core.client import KalshiAuthentication
     from core.client import FillMsg
 
