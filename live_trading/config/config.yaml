@@ -1,7 +1,7 @@
 
 kalshi_authentication_config:
-  path_to_private_key: "secret/Trading.txt"
-  access_key: "20001a26-f095-4ac7-90e5-bf3d375ec795"
+  path_to_private_key: ""
+  access_key: ""
 
 kalshi_market_config:
   kalshi_ticker: "KXETHD-26JAN1220-T3099.99"
